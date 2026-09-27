@@ -17,12 +17,22 @@ BB's **current implementation** is its WebView shell (#2515). Its older `plans/b
 | Device bridge | Versioned, schema-validated messages | MIT-licensed BB bridge adapted as `@zana-ai/zcc-mobile-bridge`; original license retained |
 | Deep links | BB scheme / hosted universal links | `zana://connect` and `zana://open`; only saved servers open automatically |
 | Navigation | Phone web layout | Drawer through 1024px on web/mobile, keyboard viewport sizing, full-width file panel; desktop layout preserved. A cold start opens the new-thread page unless a deep link or notification requests a path; the last visited page is held in memory only (never persisted) so a cookie refresh, Reload or WebView process recovery restores where the user is, while a new deep link still wins |
-| Inbox and main views | Shared responsive renderer | Inbox opens Feed/Saved reports as a full-width detail with Back; filters and list position survive. Documents stack, Agents list previews sit below the list, and page controls wrap on narrow screens. |
+| Inbox and main views | Shared responsive renderer | Inbox opens Feed/Saved reports as a full-width detail with Back; filters and list position survive. Documents and agent sessions open as full-width screens with Back navigation; page controls wrap on narrow screens. |
 | Composer | Responsive product UI | Model and Send/Stop stay visible; an expandable options panel holds mode, thinking effort and send behavior. Phone controls and picker rows have 44px touch targets; drafts survive resizing. |
 | Push | Expo push registration and backend plugin | Opt-in per-device Expo push registration and one gateway subscription; generic completion / attention alerts |
 | Builds | EAS and native Xcode/Android builds | Local native commands and EAS development, preview and production profiles |
 
 ZCC's existing Connect plugin is a host-tunnel status surface; it does not implement BB's hosted accounts, machine-code redemption or cloud gateway. This change does not point Zana at BB's production services, copy its EAS project, or reuse its signing identities.
+
+## Install on your phone with AI
+
+In the desktop app, open **Settings → Phone → Install with AI**. The button opens the standard agent composer with an editable installation prompt; press **Send** to start. The agent identifies the connected physical phone, checks the tools and source, builds and installs the app, and helps pair it with the running desktop. Opening the composer does not start an agent or enable phone access.
+
+1. Connect and unlock your phone over USB.
+2. On iPhone, trust the Mac and enable **Settings → Privacy & Security → Developer Mode**, restart, then confirm **Turn On**. Local installation requires macOS, Xcode and an Apple signing account. On Android, enable **Developer options → USB debugging** and accept the computer's authorization prompt; the agent can help prepare the Android SDK tools.
+3. Keep both devices on the same trusted network. In desktop **Settings → Phone**, enable phone access and show the pairing QR. In the installed app, select **Add server → Scan pairing QR → Connect**, and allow local-network access if requested. Keep Zana desktop running.
+
+The agent asks for phone-only confirmations as needed and preserves existing app data when updating. It verifies launch and pairing before reporting success. Platform setup references: [Apple Developer Mode](https://developer.apple.com/documentation/xcode/enabling-developer-mode-on-a-device), [Android USB debugging](https://developer.android.com/studio/debug/dev-options).
 
 ## Start on an iOS simulator
 
@@ -72,7 +82,11 @@ HTTP is permitted by the native app only for private IPv4 addresses, localhost/l
 
 ## Notifications and device features
 
-This device → Enable notifications opts a paired profile into Expo push. The gateway observes live thread transitions independently of the foreground page, so it can deliver completion and pending-input alerts while the app is suspended. Payloads contain only generic status text plus a server URL/thread route; no prompts, code, paths or model output are sent to Expo. Disabling notifications removes the token from the server. Revoking a device also removes its push registration.
+The navigation menu header has a **…** button beside Close for **Share**, **Reload**, and **This device**. In an agent, the header keeps the side-panel button at the far right, with the agent’s **…** actions beside it. Older native bridge versions use a connection action sheet for the device actions. Reload renews the native session and restores the current page. If the desktop serves an older interface, or the page cannot load, a compact native header keeps these actions accessible. The integrated menu requires mobile bridge v3 on the phone and the updated desktop renderer.
+
+The phone navigation drawer fills the screen. **New agent** sits above compact **Agents**, **Inbox**, and **More** shortcuts and a searchable agent list with project names and live status. **Agents** opens the overview with kanban, list and optional Canvas views, preserving the selected view. **More** opens a full-screen, searchable picker for History, Scheduler, installed plugins, and other destinations. Share, Reload, and This device are available through the menu header’s **…** button. Selecting an agent opens its conversation or terminal at full width; secondary panels open only when requested as a full-screen page with a Close button, a searchable view picker and compact workspace details. The phone navigation does not change the saved desktop sidebar layout.
+
+**Menu → … → This device → Enable notifications** opts a paired profile into Expo push. The gateway observes live thread transitions independently of the foreground page, so it can deliver completion and pending-input alerts while the app is suspended. Payloads contain only generic status text plus a server URL/thread route; no prompts, code, paths or model output are sent to Expo. Disabling notifications removes the token from the server. Revoking a device also removes its push registration.
 
 Before enabling push on a signed physical device:
 
