@@ -69,7 +69,10 @@ test('Docs availability follows plugin enabled state', async ({ app, home }) => 
   await expect(
     win.getByTestId('plugin-row-docs').getByRole('switch', { name: /^Disable Docs/ })
   ).toBeEnabled();
-  await route(win, '/plugins/docs/panel');
+  // Server activation precedes renderer registration of the compiled panel.
+  await win.getByRole('link', { name: 'Back to app', exact: true }).click();
+  await expect(win.getByTestId('nav-docs')).toBeVisible();
+  await win.getByTestId('nav-docs').click();
   await expect(win.locator('.library-panel')).toBeVisible();
   await expect(win.getByTestId('nav-docs')).toBeVisible();
 
