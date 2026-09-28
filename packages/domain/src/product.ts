@@ -5639,8 +5639,12 @@ export interface ExecutionBoardProjection {
        *  (re-claimed but never emitting output). Absent on a never-claimed unit. */
       attempt?: number;
       turnCount?: number;
-      claimId?: string;
-      claimGeneration?: number;
+       claimId?: string;
+       claimGeneration?: number;
+       healthState?: 'HEALTHY' | 'NO_PROGRESS';
+       reclaimCount?: number;
+       attemptedSlots?: string[];
+       quarantinedSlots?: string[];
     }>;
     rosterSlotIds: string[];
   };
@@ -5739,7 +5743,7 @@ export interface ExecutionBoardProjection {
     total: number;
     recent: Array<{
       id: string;
-      cause: 'HUMAN_BLOCKER' | 'SEMANTIC_CONFLICT' | 'POLICY_ESCALATION' | 'TYPED_OUTPUT_REPAIR' | 'TERMINAL_SYNTHESIS';
+       cause: 'HUMAN_BLOCKER' | 'NO_PROGRESS_EXHAUSTED' | 'SEMANTIC_CONFLICT' | 'POLICY_ESCALATION' | 'TYPED_OUTPUT_REPAIR' | 'TERMINAL_SYNTHESIS';
       workUnitId?: string;
       stateOrClaimGeneration: string;
       createdAt: number;
