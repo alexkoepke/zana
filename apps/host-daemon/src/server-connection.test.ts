@@ -160,7 +160,8 @@ describe('enrolled host websocket', () => {
           data: JSON.stringify({
             type: 'host.hello-ok',
             protocolVersion: HOST_RPC_PROTOCOL_VERSION,
-            hostId: parsed.hostId
+            hostId: parsed.hostId,
+            pluginHostGenerations: [{ pluginId: 'test', generation: 'current' }]
           })
         }));
       }
@@ -171,20 +172,25 @@ describe('enrolled host websocket', () => {
     }
     globalThis.WebSocket = HelloOkSocket as unknown as typeof WebSocket;
     const dataDir = mkdtempSync(join(tmpdir(), 'zcc-ws-hello-ok-'));
+    const runtime = stubRuntime(dataDir);
+    const reconcile = vi.fn().mockResolvedValue(undefined);
+    runtime.pluginHosts = { reconcileGenerations: reconcile } as unknown as NonNullable<CommandRuntime['pluginHosts']>;
     const connection = startEnrolledHostConnection({
       serverUrl: 'http://127.0.0.1:1/',
       hostId,
       hostKey: 'key-1',
       dataDir,
-      runtime: stubRuntime(dataDir),
+      runtime,
       onConnectionChange: connected => changes.push(connected)
     });
     await expect(connection.ready).resolves.toBeUndefined();
     expect(changes).toEqual([true]);
+    expect(reconcile).toHaveBeenCalledWith([{ pluginId: 'test', generation: 'current' }]);
     sockets[0]!.dispatch('close', { code: 1006 });
     expect(changes).toEqual([true, false]);
     await vi.advanceTimersByTimeAsync(5000);
     expect(changes).toEqual([true, false, true]);
+    expect(reconcile).toHaveBeenCalledTimes(2);
     await connection.close();
     expect(changes.at(-1)).toBe(false);
   });

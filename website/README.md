@@ -94,8 +94,11 @@ phone relay. In Heroku app `zcc`, set these **runtime** Config Vars:
 
 Keep `ZCC_RELAY_TOKEN` unchanged; it authenticates a separate host-enrollment
 service. No mobile configuration means the current website behavior continues.
-Enter the same mobile URL and secret in desktop **Settings → Phone → Heroku
-relay**, enable phone access, then scan a fresh pairing QR.
+This is the legacy single-computer relay. For backend compatibility tests,
+supply the same secret through `MOBILE_RELAY_TOKEN` and run `pnpm mobile:serve
+--connection relay --public-url https://zcc-7808c5bc8f3d.herokuapp.com`. The
+gateway binds only to loopback. Current phone onboarding uses the account-based
+Zana Connect service below; manual URLs and QR pairing are no longer offered.
 
 Ordinary visitors still see Next.js. `/_mobile/*`, `/_relay/*`, `/api/v1/*`,
 `/ws`, and requests carrying the exact `zcc_mobile_session` cookie route to
@@ -125,8 +128,8 @@ ZCC_MOBILE_DOCKER_IMAGE=zana-mobile-website-test pnpm test:e2e -- e2e/phone-netw
 ```
 
 This checks the real Docker website alongside phone pairing, assets, session
-revocation and reconnect. The Tailscale portion checks the Serve gateway
-contract; a real tailnet/phone-network test additionally requires sign-in.
+revocation and reconnect. Account-based internet access is covered separately
+by `e2e/phone-connect-account.spec.ts`, including personal browser addresses.
 
 For an actual deployed relay, supply `ZCC_LIVE_MOBILE_RELAY_URL` and
 `ZCC_LIVE_MOBILE_RELAY_TOKEN` through a private environment, then run
@@ -162,3 +165,20 @@ from the repo `plugins/` tree (git pointers with `subdir: plugins/<id>`). The
 site serves it at `/marketplace/v1/marketplace.json`. Desktop apps seed that
 HTTPS URL automatically (override with `ZCC_OFFICIAL_MARKETPLACE_URL`; `off`
 skips the seed). The seed is fail-soft if the feed is unreachable.
+
+### Shared mobile accounts (Zana Connect)
+
+Set `CONNECT_DOMAIN` to enable per-account laptop enrollment, phone pairing and
+server discovery in this same Docker app. It requires persistent Postgres, the
+website GitHub OAuth credentials, a stable session secret, and wildcard DNS/TLS
+for the laptop namespace. Keep one always-on web dyno. See
+[the Connect deployment and verification guide](../docs/mobile-connect.md).
+Leaving `CONNECT_DOMAIN` empty preserves the existing relay.
+
+Set `CONNECT_BROWSER_DOMAIN=zana-ide.com` to offer personal addresses such as
+`your-name.zana-ide.com`. Add the matching `*.zana-ide.com` Heroku domain, DNS
+and TLS certificate. Keep `CONNECT_DOMAIN=connect.zana-ide.com` and its wildcard
+in place so existing desktop tunnels and paired phones retain their URLs. The
+root website and reserved hosts such as `www`, `api`, `docs` and `connect` remain
+outside the personal-address router. Without `CONNECT_BROWSER_DOMAIN`, browser
+addresses retain the original `CONNECT_DOMAIN` namespace.

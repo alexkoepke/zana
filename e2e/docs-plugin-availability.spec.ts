@@ -10,6 +10,8 @@ async function route(page: Page, path: string): Promise<void> {
   }, path);
 }
 
+test.use({ initialConfig: { sponsorPromptDismissed: true }, launchEnv: { ZCC_FAKE_PROVIDER: '1' } });
+
 test('Docs availability follows plugin enabled state', async ({ app, home }) => {
   const win = app.window;
   const projectPath = join(home, 'docs-availability-project');
@@ -21,6 +23,10 @@ test('Docs availability follows plugin enabled state', async ({ app, home }) => 
     return result.value.id;
   }, projectPath);
 
+  await expect.poll(() => win.evaluate(async () => {
+    const docs = (await window.cc.pluginApps.list()).find(plugin => plugin.id === 'docs');
+    return `${docs?.enabled}:${docs?.status}:${Boolean(docs?.appUrl)}`;
+  })).toBe('true:running:true');
   await expect(win.getByTestId('nav-docs')).toBeVisible();
   await route(win, `/projects/${projectId}`);
   await expect(win.getByTestId('project-nav-docs')).toBeVisible();
@@ -74,7 +80,6 @@ test('Docs availability follows plugin enabled state', async ({ app, home }) => 
   await expect(win.getByTestId('nav-docs')).toBeVisible();
   await win.getByTestId('nav-docs').click();
   await expect(win.locator('.library-panel')).toBeVisible();
-  await expect(win.getByTestId('nav-docs')).toBeVisible();
 
   await route(win, `/projects/${projectId}`);
   await expect(win.getByTestId('project-nav-docs')).toBeVisible();

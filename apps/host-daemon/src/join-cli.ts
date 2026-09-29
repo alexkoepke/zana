@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync, renameSync, rmSync } from 'node
 import { join } from 'node:path';
 import { installRuntimeLog } from '@zana-ai/zcc-process-utils';
 import { spawn } from 'node:child_process';
+import { readConnectEnrollment } from './connect-access.js';
 import { HOST_RPC_PROTOCOL_VERSION } from '@zana-ai/zcc-contracts/host-rpc';
 import { startEnrolledHostDaemon, type EnrolledHostDaemon } from './enroll-runtime.js';
 import { parseJoinArgv, type JoinCliOptions } from './join-argv.js';
@@ -56,13 +57,14 @@ export async function runJoin(options: JoinCliOptions, restart = restartHostProc
     daemon = await startEnrolledHostDaemon({
       dataDir: options.dataDir,
       serverUrl: options.serverUrl.endsWith('/') ? options.serverUrl : `${options.serverUrl}/`,
-      token: options.joinCode, hostId: options.hostId,
+      token: options.joinCode || readConnectEnrollment(options.dataDir, options.hostId), hostId: options.hostId,
       onConnectionChange: value => { connected = value && !closing; },
       onSocketClose: code => {
         connected = false;
         if (!closing && options.autoUpdate && (code === 4001 || code === 4002)) void update(code === 4001);
       }
     });
+    rmSync(join(options.dataDir, 'connect-enroll.json'), { force: true });
     hostId = daemon.hostId;
     connected = !closing;
     await confirmHostUpdate(options.dataDir).catch(error => console.error('Host update cleanup failed:', error));

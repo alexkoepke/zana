@@ -209,6 +209,8 @@ export const DEFAULT_PROJECT_DISPLAY_NAME = 'Default Project';
 export const DEFAULT_WORKSPACE_DISPLAY_NAME = DEFAULT_PROJECT_DISPLAY_NAME;
 
 export interface Project {
+  /** Registered execution checkouts on other hosts; path/hostId remain the canonical metadata owner. */
+  sources?: import('./project-sources.js').ProjectSource[];
   /** Saved glyph. Circle or absent keeps the colored dot; the default project always uses Home. */
   icon?: ProjectIcon;
   id: string;
@@ -851,12 +853,39 @@ export interface LibraryManifest {
   docs: LibraryDoc[];
 }
 
+/** Availability belongs to the original metadata owner, never the execution picker. */
+export interface LibraryRootAvailability {
+  scope: LibraryScope;
+  projectId?: string;
+  projectName?: string;
+  hostId?: string;
+  state: 'ready' | 'offline' | 'unavailable' | 'limit';
+}
+
+export interface LibrarySnapshot {
+  docs: LibraryDoc[];
+  roots: LibraryRootAvailability[];
+  complete: boolean;
+}
+
+export interface LibraryDocLocation {
+  scope: LibraryScope;
+  projectId?: string;
+  relPath: string;
+}
+
+export interface LibraryImportInput extends LibraryDocLocation {
+  base64: string;
+}
+
 /**
  * A single body-content match from a full-text library search. `absPath` keys
  * back to the {@link LibraryDoc.absPath} stamped by `list()`, so the renderer
  * can merge these into the doc set and show `preview` as snippet context.
  */
 export interface LibrarySearchHit {
+  /** Stable identity disambiguates equal paths on different metadata hosts. */
+  docId?: string;
   absPath: string;
   scope?: LibraryScope;
   line: number;      // 1-indexed line of the first match in the doc body
@@ -1276,6 +1305,8 @@ export interface CliPlanFile {
 
 export interface TerminalSession {
   id: string;
+  /** Execution owner for a terminal hosted by an enrolled machine. */
+  hostId?: string;
   /** Opaque main-owned capability used to restore/reconnect this launch. */
   restoreCapabilityId?: string;
   projectId: string;
@@ -2618,7 +2649,7 @@ export interface AppConfig {
    */
   cloneRoot?: string;
   /**
-   * Public origin remotes use to enroll (Tailscale Serve, Heroku pairing door).
+   * Public origin remotes use to enroll (Heroku pairing relay).
    * Pairing prefers runtime `ZCC_APP_URL` or the compile-time bake, then this
    * field, then the repo `public-app-url` file. `presentAppConfig` overlays the
    * resolved origin for the renderer and never includes the relay token.
@@ -3075,12 +3106,15 @@ export interface FsReadResult {
   bytes?: number;
   binary?: boolean;
   truncated?: boolean;
+  /** Exact revision for a conflict-checked save on the owning machine. */
+  sha256?: string;
   message?: string;
 }
 
 export interface FsWriteResult {
   ok: boolean;
   bytes?: number;
+  sha256?: string;
   message?: string;
 }
 
@@ -3470,6 +3504,8 @@ export type CloneProjectResult =
 
 /** Per-fire record persisted in a schedule's status.runs ring buffer. */
 export interface ScheduleRun {
+  /** Durable spawn reservation; pending launches must never be replayed. */
+  launchState?: 'pending' | 'running' | 'failed';
   /** Stable per-run id (uuid). Older records may not have it; renderer
    *  falls back to `at + sessionId` for keys. */
   id?: string;
@@ -4447,6 +4483,8 @@ export interface GoalAssignment {
  * Newest-first in {@link Goal.history}, capped at `history.retain`.
  */
 export interface GoalIteration {
+  /** Durable reservation before launch; pending after restart requires reconciliation. */
+  launchState?: 'pending' | 'running' | 'failed';
   /** uuid, stable per iteration. */
   id: string;
   /** ISO-8601 when the iteration's session was spawned. */

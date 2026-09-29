@@ -4,6 +4,10 @@ A standalone Node service for **one computer per Heroku app, on exactly one web 
 
 The relay terminates HTTPS and can see traffic. Use an app/account you trust. This is not end-to-end encryption. No prompts, cookies, tokens, request paths or bodies are logged by this service. Heroku's router still produces its normal access logs.
 
+This is a legacy backend compatibility service. Current Zana Mobile uses GitHub
+sign-in through [Zana Connect](../../docs/mobile-connect.md); desktop Phone
+settings no longer offer manual relay URLs or QR pairing.
+
 ## Deploy
 
 For the existing Zana website/Heroku app, use the integrated deployment in
@@ -26,10 +30,10 @@ heroku ps:scale web=1 --app YOUR_APP
 
 Select one **Basic or higher, always-on web dyno**. Do not enable horizontal scaling or Preboot: separate dynos do not share the desktop socket. Multi-computer hosting and a cross-dyno routing backplane are future work. Provisioning and running Heroku resources incurs the account's normal charges.
 
-4. In desktop Zana → Settings → Phone, select **Heroku relay**, paste the URL and the same secret, and Save connection. Enable phone access. Wait for **Relay connected**, then show and scan a fresh pairing QR on the phone.
-5. On the phone, connect to that saved HTTPS address on Wi-Fi or mobile data. No VPN or router port forwarding is required.
+4. For backend compatibility testing, supply the same `MOBILE_RELAY_TOKEN` securely in the environment and run `pnpm mobile:serve --connection relay --public-url https://YOUR_APP.herokuapp.com` from the repository root with desktop running. The local gateway binds only to loopback.
+5. Its pairing output supports older clients and transport tests. Current Zana Mobile must instead use the account service; do not use this utility as its installation or sign-in flow.
 
-`GET /_relay/health` reports only service version and whether the computer is connected. Other requests require the desktop gateway's normal pairing/session authorization. `/_relay/connect` requires the tunnel secret and accepts only one desktop at a time. Rotate the secret in both Heroku and desktop settings if compromised; revoke individual phones in desktop settings.
+`GET /_relay/health` reports only service version and whether the computer is connected. Other requests require the desktop gateway's normal pairing/session authorization. `/_relay/connect` requires the tunnel secret and accepts only one desktop at a time. Rotate the secret in both Heroku and the gateway environment if compromised; revoke individual phones in desktop settings.
 
 ## Heroku behavior
 
@@ -45,4 +49,4 @@ References: [HTTP routing](https://devcenter.heroku.com/articles/http-routing), 
 
 ## Verification
 
-From the Zana repository root, run `pnpm exec vitest run services/mobile-relay` for protocol and real HTTP/WebSocket gateway tests. The built-Electron phone connection regression lives in `e2e/phone-network-connections.spec.ts`. A local regression does not claim a live Heroku deployment or real Tailscale account verification.
+From the Zana repository root, run `pnpm exec vitest run services/mobile-relay` for protocol and real HTTP/WebSocket gateway tests. The built-Electron phone connection regression lives in `e2e/phone-network-connections.spec.ts`. A local regression does not establish a live Heroku deployment or physical-phone internet access.

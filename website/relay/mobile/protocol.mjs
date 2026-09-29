@@ -3,7 +3,7 @@ import { WebSocket } from 'ws';
 
 export const TUNNEL_PATH = '/_relay/connect';
 export const LIMITS = { streams: 64, frame: 1500 * 1024, buffer: 4 * 1024 * 1024, request: 32 * 1024 * 1024, response: 64 * 1024 * 1024, chunk: 64 * 1024 };
-const REQUEST_HEADERS = new Set(['accept', 'content-type', 'content-length', 'range', 'if-none-match', 'if-modified-since', 'cookie', 'authorization', 'origin', 'sec-fetch-site']);
+const REQUEST_HEADERS = new Set(['accept', 'content-type', 'content-length', 'range', 'if-none-match', 'if-modified-since', 'cookie', 'authorization', 'origin', 'sec-fetch-site', 'x-zcc-host-id', 'x-zcc-host-session-id', 'x-zcc-connect-machine-host', 'x-zcc-connect-machine-instance']);
 const RESPONSE_HEADERS = new Set(['content-type', 'content-length', 'content-encoding', 'cache-control', 'etag', 'last-modified', 'content-range', 'accept-ranges', 'location', 'set-cookie', 'vary', 'referrer-policy', 'x-content-type-options', 'content-disposition', 'content-security-policy', 'content-security-policy-report-only', 'x-frame-options', 'strict-transport-security', 'permissions-policy', 'cross-origin-opener-policy', 'cross-origin-resource-policy']);
 
 export function headers(input, response = false) {
@@ -27,20 +27,31 @@ export function parseFrame(raw) {
   if (!frame || typeof frame !== 'object' || typeof frame.type !== 'string' || !Number.isSafeInteger(frame.id) || frame.id < 0 || frame.id > 0xffffffff) throw new Error('Invalid frame');
   return frame;
 }
-export function send(socket, frame) {
+export function send(socket, frame, callback) {
   if (socket.readyState !== WebSocket.OPEN) return false;
   const text = JSON.stringify(frame);
   if (Buffer.byteLength(text) > LIMITS.frame || socket.bufferedAmount + Buffer.byteLength(text) > LIMITS.buffer) {
     socket.terminate();
     return false;
   }
-  socket.send(text);
+  socket.send(text, callback);
   return true;
 }
 export function dataFrames(socket, type, id, data) {
   const bytes = Buffer.from(data);
   for (let offset = 0; offset < bytes.length; offset += LIMITS.chunk) {
     if (!send(socket, { type, id, data: bytes.subarray(offset, offset + LIMITS.chunk).toString('base64') })) return false;
+  }
+  return true;
+}
+/** A producer must pause while this drains; cancellation is checked per frame. */
+export async function dataFramesFlushed(socket, type, id, data, active) {
+  for (let offset = 0; offset < data.length; offset += LIMITS.chunk) {
+    if (!active()) return false;
+    const sent = await new Promise(resolve => {
+      if (!send(socket, { type, id, data: data.subarray(offset, offset + LIMITS.chunk).toString('base64') }, error => resolve(!error))) resolve(false);
+    });
+    if (!sent) return false;
   }
   return true;
 }

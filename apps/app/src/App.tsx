@@ -90,6 +90,7 @@ import { isSplitWorkspacePath } from './lib/split-layout/splitThreadNavigation.j
 import { product } from './lib/product-client.js';
 import { waitForProductWsOpen } from './lib/product-ws.js';
 import { useCliAgentTerminalSignal } from './components/thread/secondary-panel/useThreadOpenTerminalSignal.js';
+import { installThreadOpenFileSignals } from './components/thread/secondary-panel/useThreadOpenFileSignal.js';
 import { installAgentBoardMoves } from './stores/agent-board-moves.js';
 import {
   AGENTS_ROUTE_PATH,
@@ -271,6 +272,7 @@ export function App() {
   }, [nav, modules]);
   const shellChrome = useShellChromeState();
   useCliAgentTerminalSignal();
+  useEffect(installThreadOpenFileSignals, []);
 
   // Server-owned plugins publish a redacted app snapshot through the supervised
   // runtime. Their bundles load from the same-origin static host, not the legacy

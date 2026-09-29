@@ -299,6 +299,15 @@ describe('thread secondary panel state', () => {
     expect(addClosableTab(inbox, { kind: 'inbox', title: 'Inbox' }).tabs).toHaveLength(1);
   });
 
+  it.each(['file-preview', 'storage-preview'] as const)('refreshes an explicit repeated %s while retaining the tab identity', (kind) => {
+    const opened = addClosableTab(emptySecondaryPanelState(), { kind, path: 'report.md', title: 'Report', lineNumber: 3 });
+    const repeated = addClosableTab(opened, { kind, path: 'report.md', title: 'Report' });
+    expect(repeated.tabs).toHaveLength(1);
+    expect(repeated.tabs[0]).toMatchObject({ id: opened.tabs[0].id, lineNumber: 3, previewRevision: 1 });
+    const next = addClosableTab(repeated, { kind, path: 'report.md', title: 'Report', lineNumber: 9 });
+    expect(next.tabs[0]).toMatchObject({ id: opened.tabs[0].id, lineNumber: 9, previewRevision: 2 });
+  });
+
   it('leaves inactive tabs in place when closing another tab', () => {
     const first = addClosableTab(emptySecondaryPanelState(), { kind: 'new-tab', title: 'New Tab' });
     const second = addClosableTab(first, { kind: 'new-tab', title: 'New Tab' });

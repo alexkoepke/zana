@@ -89,6 +89,7 @@ export async function callControlAsProductServer(
 
 export interface ProductCliAgentCreateInput {
   projectId: string;
+  hostId?: string;
   profile: string;
   prompt?: string;
   personaId?: string;
@@ -105,6 +106,7 @@ export interface ProductCliAgentCreateInput {
 export interface ProductCliAgentRecord {
   id: string;
   projectId: string;
+  hostId?: string;
   profile: string;
   title?: string;
   status: string;
@@ -145,12 +147,13 @@ export function asControlResult<T>(value: unknown): Result<T> {
 }
 
 export function sessionToCliAgent(
-  session: Pick<TerminalSession, 'id' | 'projectId' | 'profile' | 'title' | 'pid'>,
+  session: Pick<TerminalSession, 'id' | 'projectId' | 'hostId' | 'profile' | 'title' | 'pid'>,
   status: string
 ): ProductCliAgentRecord {
   return {
     id: session.id,
     projectId: session.projectId,
+    ...(session.hostId ? { hostId: session.hostId } : {}),
     profile: session.profile,
     title: session.title,
     status,

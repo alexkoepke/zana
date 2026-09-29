@@ -7,6 +7,8 @@ export interface RelayOptions {
   allowLocal?: boolean;
   heartbeatMs?: number;
   requestTimeoutMs?: number;
+  queueTimeoutMs?: number;
+  onVisitor?: (socket: import('ws').WebSocket, request: IncomingMessage) => void;
 }
 
 export function createRelay(options: RelayOptions): {

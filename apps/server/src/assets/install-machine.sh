@@ -93,7 +93,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$join_code" ] && [ -n "$host_id" ] && [ -n "$server_url" ] || usage
+[ -n "$host_id" ] && [ -n "$server_url" ] || usage
+[ -n "$join_code" ] || [ -n "${ZCC_CONNECT_HEADER_FILE:-}" ] || usage
 
 server_url=${server_url%/}
 server_host=$(printf '%s' "$server_url" | sed -E 's#^https?://##; s#[/:].*##')
@@ -102,13 +103,17 @@ server_host=$(printf '%s' "$server_url" | sed -E 's#^https?://##; s#[/:].*##')
 data_dir=${ZCC_DATA_DIR:-"$HOME/.zcc-machines/$server_host"}
 mkdir -p "$data_dir"
 chmod 700 "$data_dir"
-# A new join host id cannot keep a previous enroll's host.id (persistHostId
-# used to refuse the mismatch). Drop leftover identity; keep runtime files.
+# Never erase another identity to make enrollment succeed.
 if [ -f "$data_dir/host.id" ]; then
   existing_id=$(tr -d '[:space:]' < "$data_dir/host.id")
   if [ "$existing_id" != "$host_id" ]; then
-    rm -f "$data_dir/host.id" "$data_dir/auth.json"
+    echo "This installation belongs to another machine. Generate a repair code for it, or use another isolated data directory." >&2
+    exit 1
   fi
+fi
+if [ -n "${ZCC_CONNECT_INSTANCE_ID:-}" ]; then
+  # Stable service identity survives address changes and separates instances.
+  server_host=$ZCC_CONNECT_INSTANCE_ID
 fi
 
 port_dir="$HOME/.zcc-machines/host-daemon-ports"
@@ -137,7 +142,12 @@ package_dir="$data_dir/runtime"
 mkdir -p "$package_dir"
 package_file="$package_dir/zcc-host.tgz"
 echo "Downloading host-daemon artifact…"
-curl -fL --connect-timeout 10 --max-time 300 --retry 2 "$server_url/install/zcc-host.tgz" -o "$package_file"
+if [ -n "${ZCC_CONNECT_HEADER_FILE:-}" ]; then
+  # Credentials are in a private file, never argv; never follow a redirect.
+  curl -f --proto '=https' --header "@$ZCC_CONNECT_HEADER_FILE" --max-filesize 268435456 --connect-timeout 10 --max-time 300 --retry 2 "$server_url/install/zcc-host.tgz" -o "$package_file"
+else
+  curl -fL --connect-timeout 10 --max-time 300 --retry 2 "$server_url/install/zcc-host.tgz" -o "$package_file"
+fi
 tar -xzf "$package_file" -C "$package_dir"
 
 join_bin=${ZCC_HOST_JOIN_CLI:-}
@@ -201,7 +211,7 @@ wait_connected() {
   max=${ZCC_INSTALL_WAIT_ATTEMPTS:-60}
   delay=${ZCC_INSTALL_WAIT_DELAY:-1}
   while [ "$i" -lt "$max" ]; do
-    if curl -sf "http://127.0.0.1:$port/status" 2>/dev/null | grep -q '"connected":true'; then
+    if curl -sf --max-time 2 "http://127.0.0.1:$port/status" 2>/dev/null | "$NODE_BIN" -e 'let s="";process.stdin.on("data",b=>{s+=b;if(s.length>4096)process.exit(1)});process.stdin.on("end",()=>{try{const v=JSON.parse(s);process.exit(v.connected===true&&v.hostId===process.argv[1]&&v.serverUrl.replace(/\/$/,"")===process.argv[2]?0:1)}catch{process.exit(1)}})' "$host_id" "$server_url"; then
       return 0
     fi
     i=$((i + 1))

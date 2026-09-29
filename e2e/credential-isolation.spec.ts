@@ -5,6 +5,21 @@ import { join } from 'node:path';
 
 test.use({ launchEnv: { ZCC_FAKE_PROVIDER: '1' } });
 
+test('host CLI health checks resolve the isolated Claude on PATH', async ({ app }) => {
+  const status = await app.window.evaluate(async () => {
+    const response = await fetch('/api/v1/hosts');
+    const body = await response.json();
+    const hosts = Array.isArray(body) ? body : body.hosts;
+    const host = hosts.find((candidate: { status: string }) => candidate.status === 'connected');
+    if (!host) throw new Error('Isolated host was not enrolled');
+    const checked = await fetch(`/api/v1/hosts/${host.id}/provider-clis/status`);
+    if (!checked.ok) throw new Error(await checked.text());
+    return (await checked.json()).claudeCode;
+  });
+  expect(status.executablePath).toBe(DISABLED_CLAUDE_BINARY);
+  expect(status.currentVersion).toBeNull();
+});
+
 test('background naming cannot invoke real Claude from an isolated test home', async ({ app }) => {
   const binary = await app.window.evaluate(async () => (await window.cc.config.get()).claudeBinary);
   expect(binary).toBe(DISABLED_CLAUDE_BINARY);

@@ -368,6 +368,12 @@ export function createDesktopBrowserViewManager(options?: {
   ): void {
     const webContents = entry.view.webContents;
 
+    // BB's scoped CDP bridge needs targetInfoChanged after initial navigation;
+    // otherwise automation waits forever on a freshly created tab's empty URL.
+    webContents.on('did-navigate', notifyAutomationTabs);
+    webContents.on('did-navigate-in-page', notifyAutomationTabs);
+    webContents.on('page-title-updated', notifyAutomationTabs);
+
     webContents.on('will-frame-navigate', (event) => {
       if (!event.isMainFrame) return;
       if (!isAllowedBrowserUrl(event.url)) event.preventDefault();

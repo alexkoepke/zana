@@ -1,3 +1,4 @@
+import { subscribeClientRecovery } from './lib/client-recovery.js';
 import { create } from 'zustand';
 import type {
   AgentState,
@@ -190,11 +191,13 @@ export type SettingsTab =
   | 'personas'
   | 'squads'
   | 'usage'
+  | 'performance'
   | 'experimental'
   | 'about'
   | 'machines'
   | 'connectivity'
   | 'phone'
+  | 'remote-access'
   | 'inbox'
   | 'browser'
   | (string & {});
@@ -1739,6 +1742,7 @@ interface DataState {
       extraArgs?: string[];
       harnessRouting?: import('@zana-ai/zcc-domain/product').HarnessModelRoutingV1;
       title?: string;
+      hostId?: string;
       cwd?: string;
       isolateScratch?: boolean | string;
       /** Isolated-worktree launch intent: legacy `true` (branch derived from the title/
@@ -1894,6 +1898,7 @@ interface DataState {
  * but a genuine app relaunch (fresh module graph) resets it to false.
  */
 let sessionsRestored = false;
+let stopClientRecovery: (() => void) | undefined;
 
 /**
  * Filter out hidden (headless) terminals from a project's tab strip. Hidden
@@ -2499,6 +2504,15 @@ export const useData = create<DataState>((set, get) => ({
       }
     })();
     await Promise.all([loadInbox, loadInboxRead, loadSuggestions, loadSaved, loadMesh]);
+    stopClientRecovery?.();
+    if (!hasDesktopBridge()) stopClientRecovery = subscribeClientRecovery(product, {
+      projects: projects => set({ projects }),
+      inbox: ({ entries }) => useInbox.setState({ entries, loading: false }),
+      suggestions: ({ entries }) => useSuggestions.setState({ entries, loading: false }),
+      saved: records => useSaved.setState({ records, loading: false }),
+      terminals: (projectId, sessions) => set(state => ({ terminals: { ...state.terminals, [projectId]: sessions } }))
+    }, scopedProjectId ?? undefined);
+
 
     product.inbox.onAppended((entry) => {
       if (scopedProjectId && entry.projectId !== scopedProjectId) return;
@@ -2689,16 +2703,7 @@ export const useData = create<DataState>((set, get) => ({
     product.scheduler.onChanged((tasks) => {
       useScheduler.setState({ tasks });
     });
-    subscribeProductEvent<{ action?: string; id?: string; enabled?: boolean }>('scheduler:command', (payload) => {
-      if (!payload?.id) return;
-      if (payload.action === 'run-now') {
-        void product.scheduler.runNow(payload.id);
-        return;
-      }
-      if (payload.action === 'set-enabled' && typeof payload.enabled === 'boolean') {
-        void product.scheduler.setEnabled(payload.id, payload.enabled);
-      }
-    });
+
 
     // Goals: one-shot list + push subscription, mirroring the scheduler. Main
     // emits `goals:onChanged` after every CRUD action, every iteration spawn,
@@ -2774,17 +2779,9 @@ export const useData = create<DataState>((set, get) => ({
       useAutonomousRuns.setState({ runs });
     });
 
-    // Library: one-shot list + full-list push (like saved). Reconciled on read:
-    // manifest + on-disk, both scopes, newest-first.
-    try {
-      const docs = await product.library.list();
-      useLibrary.setState({ docs, loading: false });
-    } catch {
-      useLibrary.setState({ loading: false });
-    }
-    product.library.onChanged((docs) => {
-      useLibrary.setState({ docs, loading: false });
-    });
+    // Subscribe before the initial read; a push fences any older in-flight result.
+    product.library.onSnapshotChanged(snapshot => useLibrary.getState().receive(snapshot));
+    await useLibrary.getState().refresh();
 
     // Schedule groups: one-shot + push. Main seeds Personal/Work on first run
     // and watches ~/.zcc/groups.json for hand edits.
@@ -3217,6 +3214,7 @@ export const useData = create<DataState>((set, get) => ({
         harnessRouting: opts?.harnessRouting,
         title: opts?.title,
         cwd: opts?.cwd,
+        hostId: opts?.hostId,
         isolateScratch: opts?.isolateScratch,
         worktree: opts?.worktree,
         workspace: opts?.workspace,

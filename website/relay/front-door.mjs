@@ -11,6 +11,7 @@ import {
 } from './ws-raw.mjs';
 import { nextOriginFromEnv, proxyToNext, shouldSpawnNext, spawnNextServer, waitForHttp } from './next-proxy.mjs';
 import { createMobileRouting } from './mobile-routing.mjs';
+import { createHostedConnect } from '../connect/runtime.mjs';
 
 function isWebSocketUpgrade(request) {
   return String(request.headers.upgrade ?? '').toLowerCase() === 'websocket';
@@ -44,6 +45,7 @@ export async function startFrontDoor(options = {}) {
   // Bind $PORT before Next is ready — Heroku kills dynos that do not listen in time.
   let nextReady = !spawn;
   const mobile = createMobileRouting(env);
+  const connect = await createHostedConnect(env);
 
   const hub = createPairingHub({
     env,
@@ -52,6 +54,7 @@ export async function startFrontDoor(options = {}) {
     maxSessions: options.maxSessions
   });
   const server = createServer((request, response) => {
+    if (connect?.matches(request)) { void connect.handleHttp(request, response); return; }
     if (mobile?.matches(request)) { mobile.handleHttp(request, response); return; }
     const pathname = normalizePairingPath(new URL(request.url ?? '/', 'http://127.0.0.1').pathname);
     if (pathname === '/_zcc/relay') {
@@ -67,9 +70,13 @@ export async function startFrontDoor(options = {}) {
   });
   server.headersTimeout = 15_000;
   server.requestTimeout = 30_000;
-  server.maxConnections = 160;
+  // Edge proxies retain idle HTTP/1.1 sockets after multiplexed browser asset
+  // loads. A 160-socket cap dropped subsequent API calls without a response.
+  // Keep this separate from the much smaller per-desktop stream/queue limits.
+  server.maxConnections = 1024;
 
   server.on('upgrade', (request, socket, head) => {
+    if (connect?.matches(request)) { void connect.handleUpgrade(request, socket, head); return; }
     if (mobile?.matches(request)) { mobile.handleUpgrade(request, socket, head); return; }
     const requestUrl = new URL(request.url ?? '/', 'http://127.0.0.1');
     const pathname = normalizePairingPath(requestUrl.pathname);
@@ -148,6 +155,7 @@ export async function startFrontDoor(options = {}) {
       return hub.sessionCount();
     },
     close: async () => {
+      await connect?.close();
       mobile?.close();
       hub.dispose();
       server.closeAllConnections();

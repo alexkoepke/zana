@@ -36,6 +36,8 @@ export interface ClosableSecondaryTab {
   openerKey?: string | null;
   automationTargetId?: string | null;
   lineNumber?: number | null;
+  /** Local reload signal for an explicit repeat file-open request. */
+  previewRevision?: number;
 }
 
 export interface ThreadSecondaryPanelState {
@@ -290,12 +292,17 @@ export function addClosableTab(
   const existing = matchExistingTab(state.tabs, input);
   if (existing) {
     const nextLine = input.lineNumber !== undefined ? input.lineNumber : existing.lineNumber;
-    if (nextLine !== existing.lineNumber) {
+    const refreshPreview = input.kind === 'file-preview' || input.kind === 'storage-preview';
+    if (refreshPreview || nextLine !== existing.lineNumber) {
       return {
         ...state,
         isOpen: true,
         activeId: existing.id,
-        tabs: state.tabs.map((tab) => (tab.id === existing.id ? { ...tab, lineNumber: nextLine } : tab))
+        tabs: state.tabs.map((tab) => (tab.id === existing.id ? {
+          ...tab,
+          lineNumber: nextLine,
+          ...(refreshPreview ? { previewRevision: (tab.previewRevision ?? 0) + 1 } : {})
+        } : tab))
       };
     }
     return { ...state, isOpen: true, activeId: existing.id };

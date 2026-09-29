@@ -3,7 +3,7 @@ import { createServer, type Server } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { WebSocket, WebSocketServer } from 'ws';
 import { startRelay } from './server.mjs';
@@ -25,6 +25,7 @@ async function setup(options: { timeout?: number } = {}) {
     if (req.url === '/slow') return;
     if (req.method === 'POST') writes++;
     if (req.url === '/pending') return;
+    if (req.url?.startsWith('/assets/')) return res.end(Buffer.alloc(8 * 1024 * 1024, Number(req.url.split('/').at(-1))));
     const chunks = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     res.setHeader('content-type', 'application/octet-stream');
@@ -90,6 +91,18 @@ describe('mobile relay with the real authenticated gateway', () => {
     const unauth = new WebSocket(env.publicUrl.replace('http:', 'ws:') + '/ws');
     cleanup.push(() => unauth.terminate());
     expect((await once(unauth, 'close'))[0]).toBe(1011);
+  });
+  it('drains concurrent large app assets without overflowing the shared tunnel', async () => {
+    const env = await setup(); const { cookie } = await env.pair();
+    await Promise.all(Array.from({ length: 6 }, async (_, index) => {
+      const response = await fetch(`${env.publicUrl}/assets/${index}`, { headers: { cookie } });
+      expect(response.status).toBe(200);
+      const body = Buffer.from(await response.arrayBuffer());
+      expect(body.length).toBe(8 * 1024 * 1024);
+      expect(createHash('sha256').update(body).digest('hex')).toBe(createHash('sha256').update(Buffer.alloc(body.length, index)).digest('hex'));
+    }));
+    expect(env.client.state()).toBe('connected');
+    expect((await fetch(env.publicUrl, { headers: { cookie } })).status).toBe(200);
   });
   it('survives relay restarts without re-pairing or replaying writes', async () => {
     const env = await setup(); const { cookie } = await env.pair();

@@ -45,6 +45,7 @@ import { startLocalRegistry, type LocalRegistry, type DummyExtensionSpec } from 
 import { EventRecorder } from '../sdk/events.js';
 import { linuxCiElectronArgs, linuxCiElectronEnv } from './linux-electron-launch.js';
 import { isolatedClaudePath, writeAppConfig } from './app-config.js';
+import { isolateTmuxEnvironment, cleanupTmuxEnvironment } from './tmux-isolation.js';
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const MAIN_ENTRY = join(process.env.ZCC_E2E_APP_ROOT || REPO_ROOT, 'out/main/index.js');
@@ -311,7 +312,7 @@ export async function launchApp(home: string, opts: LaunchOptions = {}): Promise
     // of bug as the ozone flag above), so it must ride in argv, not be appended
     // at runtime, or macOS pops a real Keychain prompt on a headless E2E run.
     args: [...linuxCiElectronArgs(), '--use-mock-keychain', `--user-data-dir=${userDataDir}`, MAIN_ENTRY],
-    env,
+    env: isolateTmuxEnvironment(home, env),
     timeout: 60_000
   });
   let stderrTail = '';
@@ -331,7 +332,9 @@ export async function launchApp(home: string, opts: LaunchOptions = {}): Promise
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`${message}\n\nmain stderr:\n${stderr}`);
   } finally {
-    app.process()?.stderr?.off('data', captureStderr);
+    // Playwright may dispose its internal process handle during close(). Keep
+    // cleanup from replacing the useful launch error with an _object error.
+    try { app.process()?.stderr?.off('data', captureStderr); } catch {}
   }
 }
 
@@ -407,12 +410,13 @@ export const test = base.extend<Fixtures>({
   home: async ({}, use) => {
     const home = mkdtempSync(join(tmpdir(), 'zcc-e2e-home-'));
     if (process.env.ZCC_E2E_KEEP_HOME === '1') console.error(`[e2e] preserving HOME ${home}`);
-    await use(home);
-    if (process.env.ZCC_E2E_KEEP_HOME === '1') return;
     try {
-      rmSync(home, { recursive: true, force: true });
-    } catch {
-      /* best-effort */
+      await use(home);
+    } finally {
+      await cleanupTmuxEnvironment(home);
+      if (process.env.ZCC_E2E_KEEP_HOME !== '1') {
+        try { rmSync(home, { recursive: true, force: true }); } catch { /* best-effort */ }
+      }
     }
   },
 

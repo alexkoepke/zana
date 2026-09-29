@@ -11,7 +11,7 @@ import { WebSocket } from 'ws';
 import { mobileRelayService } from './fixtures/mobile-relay-service.js';
 import { phonePortEnv } from './fixtures/phone-port.js';
 
-test('Phone settings supports local, Tailscale HTTPS and a reconnecting Heroku-style relay', async ({ home }, testInfo) => {
+test('Phone access rejects LAN setup and keeps the Heroku relay on loopback', async ({ home }, testInfo) => {
   test.setTimeout(180_000);
   const cert = join(home, 'relay-cert.pem'); const key = join(home, 'relay-key.pem');
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'], { stdio: 'ignore' });
@@ -63,40 +63,22 @@ test('Phone settings supports local, Tailscale HTTPS and a reconnecting Heroku-s
     const win = app.window;
     await win.getByRole('link', { name: 'Settings', exact: true }).click();
     await win.getByTestId('settings-nav-phone').click();
-    const method = win.getByLabel('Connection method');
-    await expect(method).toHaveValue('local');
-    await method.selectOption('tailscale');
-    await win.getByLabel('Tailscale HTTPS address').fill('https://mac.example.ts.net');
-    await win.getByRole('button', { name: 'Save connection', exact: true }).click();
-    await expect.poll(() => win.evaluate(() => window.cc.mobile.status())).toMatchObject({ connection: { mode: 'tailscale' } });
-    await win.getByRole('switch', { name: 'Enable phone access' }).click();
-    await expect.poll(() => win.evaluate(() => window.cc.mobile.status())).toMatchObject({ running: true, host: '127.0.0.1', publicUrl: 'https://mac.example.ts.net' });
-    const payload = await win.evaluate(() => window.cc.mobile.pair());
-    expect(payload.serverUrl).toBe('https://mac.example.ts.net');
-    const status = await win.evaluate(() => window.cc.mobile.status());
-    // This is the last hop used by Tailscale Serve, preserving the HTTPS host.
-    const tailscaleHop = (path: string, body: unknown, extra: Record<string, string> = {}) => new Promise<{ status: number; body: string }>((resolve, reject) => {
-      const req = httpRequest({ hostname: '127.0.0.1', port: status.port!, path, method: 'POST', headers: { host: 'mac.example.ts.net', 'content-type': 'application/json', ...extra } }, res => {
-        const chunks: Buffer[] = []; res.on('data', chunk => chunks.push(chunk)); res.on('end', () => resolve({ status: res.statusCode!, body: Buffer.concat(chunks).toString() }));
-      });
-      req.on('error', reject); req.end(JSON.stringify(body));
-    });
-    const paired = await tailscaleHop('/_mobile/pair', { code: payload.code, label: 'Tailscale fixture phone' });
-    expect(paired.status).toBe(200);
-    const credential = JSON.parse(paired.body).credential;
-    const secureSession = await tailscaleHop('/_mobile/session', {}, { authorization: `Bearer ${credential}` });
-    const tailscaleCookie = JSON.parse(secureSession.body).cookie;
-    expect(tailscaleCookie.secure).toBe(true);
-    const tailscaleHeaders = { host: 'mac.example.ts.net', cookie: `${tailscaleCookie.name}=${tailscaleCookie.value}` };
-    await verifyEvents(`ws://127.0.0.1:${status.port}/ws`, tailscaleHeaders, () => tailscaleHop('/api/v1/config', {}, tailscaleHeaders));
-
-    await method.selectOption('relay');
-    await win.getByLabel('Relay HTTPS address').fill(publicUrl);
-    await win.getByLabel('Relay secret').fill(token);
-    await win.getByRole('button', { name: 'Save connection', exact: true }).click();
-    await expect.poll(() => win.evaluate(() => window.cc.mobile.status()), { timeout: 20_000 }).toMatchObject({ relayState: 'connected', connection: { mode: 'relay', hasRelayToken: true } });
-    await expect(win.getByText('Relay connected', { exact: true })).toBeVisible();
-    await expect(win.getByRole('button', { name: 'Show pairing QR', exact: true })).toBeEnabled();
+    await expect(win.getByLabel('Connection method')).toHaveCount(0);
+    await expect(win.getByRole('button', { name: 'Show pairing QR' })).toHaveCount(0);
+    await expect(win.getByRole('link', { name: 'Get a connect code' })).toBeVisible();
+    for (const mode of ['local', 'tailscale']) {
+      expect(await win.evaluate(async mode => {
+        try { await window.cc.mobile.configure({ mode } as never); return ''; }
+        catch (error) { return String(error); }
+      }, mode)).toContain('no longer supported');
+    }
+    await expect.poll(() => win.evaluate(() => window.cc.mobile.status())).toMatchObject({ running: false, connection: { mode: 'unconfigured' } });
+    // Keep the existing relay transport covered without exposing its former LAN UI.
+    await win.evaluate(async ({ publicUrl, token }) => {
+      await window.cc.mobile.configure({ mode: 'relay', publicUrl, relayToken: token });
+      await window.cc.config.set({ mobileGatewayEnabled: true });
+    }, { publicUrl, token });
+    await expect.poll(() => win.evaluate(() => window.cc.mobile.status()), { timeout: 20_000 }).toMatchObject({ host: '127.0.0.1', boundLan: false, relayState: 'connected', connection: { mode: 'relay', hasRelayToken: true } });
     if (process.env.ZCC_MOBILE_DOCKER_IMAGE) {
       // The same Docker app still serves the real Next site to ordinary visitors.
       await expect.poll(async () => (await remoteRequest('/')).status, { timeout: 30_000 }).toBe(200);
@@ -127,26 +109,13 @@ test('Phone settings supports local, Tailscale HTTPS and a reconnecting Heroku-s
     expect((await remoteRequest('/', { headers: { cookie } })).status).toBe(200);
     await win.evaluate(id => window.cc.mobile.revoke(id), phone.deviceId);
     expect((await remoteRequest('/', { headers: { cookie } })).status).toBe(401);
-    await method.selectOption('local');
-    await win.getByRole('button', { name: 'Save connection', exact: true }).click();
-    await expect.poll(() => win.evaluate(() => window.cc.mobile.status())).toMatchObject({ running: true, connection: { mode: 'local' } });
+    expect(await win.evaluate(async () => {
+      try { await window.cc.mobile.configure({ mode: 'local' } as never); return ''; }
+      catch (error) { return String(error); }
+    })).toContain('Local-network');
+    await expect.poll(() => win.evaluate(() => window.cc.mobile.status())).toMatchObject({ running: true, host: '127.0.0.1', boundLan: false, connection: { mode: 'relay' } });
+    await win.evaluate(() => window.cc.config.set({ mobileGatewayEnabled: false }));
     await expect.poll(() => relay.connected()).toBe(false);
-    // Exercise the selected LAN interface too, including pairing and revocation.
-    const local = await win.evaluate(() => window.cc.mobile.status());
-    const localCode = (await win.evaluate(() => window.cc.mobile.pair())).code;
-    const localPhone = await (await fetch(local.publicUrl! + '/_mobile/pair', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: localCode, label: 'LAN fixture phone' })
-    })).json() as { credential: string; deviceId: string };
-    const localSession = await fetch(local.publicUrl! + '/_mobile/session', {
-      method: 'POST', headers: { authorization: `Bearer ${localPhone.credential}` }
-    });
-    expect(localSession.status).toBe(200);
-    const localCookie = localSession.headers.get('set-cookie')!.split(';')[0];
-    await verifyEvents(local.publicUrl!.replace('http:', 'ws:') + '/ws', { cookie: localCookie },
-      () => fetch(local.publicUrl! + '/api/v1/config', { method: 'PATCH', headers: { cookie: localCookie, 'content-type': 'application/json' }, body: '{}' }));
-    expect((await fetch(local.publicUrl!, { headers: { cookie: localCookie } })).status).toBe(200);
-    await win.evaluate(id => window.cc.mobile.revoke(id), localPhone.deviceId);
-    expect((await fetch(local.publicUrl!, { headers: { cookie: localCookie } })).status).toBe(401);
   } finally {
     await app?.electron.close(); await relay.close(); for (const socket of peers) socket.destroy();
     edge.closeAllConnections(); await new Promise<void>(resolve => edge.close(() => resolve()));

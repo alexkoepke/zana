@@ -167,6 +167,8 @@ export type HostBootstrapEvent =
   | { type: 'done'; hostId: string }
   | { type: 'error'; code: string; message: string; pairingCommand?: string };
 
+export interface ProjectFileScope { projectId: string; hostId: string; environmentId?: string }
+
 export interface CcApi {
   /** Isolated in-app browser overlay. Present only in the desktop preload. */
   browser: DesktopBrowserApi;
@@ -310,6 +312,7 @@ export interface CcApi {
     paths(
       projectId: string,
       opts?: {
+        hostId?: string;
         query?: string;
         limit?: number;
         includeFiles?: boolean;
@@ -345,7 +348,7 @@ export interface CcApi {
    * live connected status, permission ceiling, and remote directory browse.
    */
   hosts: {
-    createJoinCode(): Promise<{ joinCode: string; hostId: string; expiresAt: number }>;
+    createJoinCode(): Promise<{ enrollmentId?: string; joinCode: string; hostId: string; expiresAt: number; installCommand?: string }>;
     list(): Promise<Host[]>;
     get(id: string): Promise<Host>;
     update(
@@ -415,8 +418,21 @@ export interface CcApi {
    * `hosts.pairing`). Enable/disable rides the `mobileGatewayEnabled` AppConfig
    * toggle; these calls read status and mint/read/revoke pairing state.
    */
+  sharedClient: {
+    list(): Promise<Array<{ id: string; instanceId: string; name: string; url: string; online: boolean }>>;
+    signIn(): Promise<void>;
+    select(serverId: string): Promise<void>;
+    local(): Promise<void>;
+    signOut(): Promise<void>;
+  };
   mobile: {
-    configure(input: { mode: 'local' | 'tailscale' | 'relay'; publicUrl?: string; relayToken?: string }): Promise<void>;
+    enroll(address: string): Promise<{ verificationUrl: string; expiresAt: number }>;
+    pollEnrollment(): Promise<{ pending: boolean }>;
+    cancelEnrollment(): Promise<void>;
+    disconnectAccount(): Promise<void>;
+    browserAddress(): Promise<string | null>;
+    redeemComputerCode(address: string, code: string): Promise<void>;
+    configure(input: { mode: 'relay'; publicUrl?: string; relayToken?: string }): Promise<void>;
     status(): Promise<{
       running: boolean;
       publicUrl: string | null;
@@ -426,8 +442,10 @@ export interface CcApi {
       boundLan: boolean;
       /** Last start failure (e.g. port in use), else null. */
       error: string | null;
-      connection?: { mode: 'local' | 'tailscale' | 'relay'; publicUrl?: string; hasRelayToken: boolean };
+      connection?: { mode: 'unconfigured' | 'relay' | 'connect'; publicUrl?: string; hasRelayToken: boolean; accountUrl?: string };
       relayState?: 'connecting' | 'connected' | 'reconnecting' | 'stopped';
+      distribution?: { testFlightUrl: string | null };
+      readySessions?: Array<{ id: string; label: string; platform: 'ios' | 'android'; appVersion: string; lastSeenAt: number }>;
     }>;
     pair(): Promise<{ version: number; serverUrl: string; code: string; expiresAt: number }>;
     devices(): Promise<Array<{ id: string; label: string; createdAt: number; expiresAt: number }>>;
@@ -534,7 +552,7 @@ export interface CcApi {
         activeGoalCount: number;
       };
     }>>;
-    get(threadId: string): Promise<{ thread: Record<string, unknown> }>;
+    get(threadId: string, options?: { signal: AbortSignal }): Promise<{ thread: Record<string, unknown> }>;
     send(
       threadId: string,
       input: string | unknown[],
@@ -571,7 +589,7 @@ export interface CcApi {
       afterSequence?: string;
       includeNestedRows?: 'true' | 'false';
       summaryOnly?: 'true' | 'false';
-    }): Promise<{
+    }, options?: { signal: AbortSignal }): Promise<{
       rows: unknown[];
       events?: unknown[];
       status: string;
@@ -609,8 +627,8 @@ export interface CcApi {
     }>;
     timelineTurnSummaryDetails(
       threadId: string,
-      query: { turnId: string; sourceSeqStart: string; sourceSeqEnd: string }
-    ): Promise<{ rows: unknown[] }>;
+      query: { turnId: string; sourceSeqStart: string; sourceSeqEnd: string; beforeCursor?: string }
+    ): Promise<{ rows: unknown[]; olderCursor?: string | null }>;
     queuedMessages(threadId: string): Promise<unknown[]>;
     createQueuedMessage(threadId: string, body: { text?: string; input?: unknown[]; model?: string }): Promise<unknown>;
     updateQueuedMessage(threadId: string, queuedMessageId: string, body: { input: unknown[]; expectedUpdatedAt: number }): Promise<unknown>;
@@ -809,6 +827,8 @@ export interface CcApi {
      * isn't a blank buffer. Empty string when nothing is buffered.
      */
     backlog(sessionId: string): Promise<string>;
+    /** Hosted terminals carry UTF-16 offsets across retained snapshots and events. */
+    backlogSnapshot?(sessionId: string): Promise<string | { text: string; startOffset: number; endOffset: number }>;
     /**
      * Native on-disk CLI plan for a Plan-mode local session. Renderer supplies
      * sessionId only; main discovers and confines the path.
@@ -878,7 +898,7 @@ export interface CcApi {
      * window the same way {@link subagentSnapshot} seeds the count.
      */
     subagentChildrenSnapshot(): Promise<Array<[string, SubagentChild[]]>>;
-    onData(cb: (sessionId: string, data: string) => void): () => void;
+    onData(cb: (sessionId: string, data: string, cursor?: { startOffset: number; endOffset: number }) => void): () => void;
     onExit(cb: (sessionId: string, code: number) => void): () => void;
     /**
      * Fired when the machine wakes from sleep (powerMonitor 'resume'). No
@@ -1047,26 +1067,26 @@ export interface CcApi {
   fs: {
     /** Opens the native file chooser and returns only user-selected local paths. */
     pickFiles(): Promise<string[]>;
-    listDir(path: string): Promise<FsEntry[]>;
-    readFile(path: string): Promise<FsReadResult>;
+    listDir(path: string, scope?: ProjectFileScope): Promise<FsEntry[]>;
+    readFile(path: string, scope?: ProjectFileScope): Promise<FsReadResult>;
     /**
      * Resolve a doc path reported by an agent that 404s at its reported
      * location — relocating it relative to `root`/`originCwd`. Main authorizes
      * and confines to `root`.
      */
     resolveDoc(root: string, reportedPath: string, originCwd?: string): Promise<FsResolveDocResult>;
-    writeFile(path: string, content: string): Promise<FsWriteResult>;
+    writeFile(path: string, content: string, scope?: ProjectFileScope, expectedSha256?: string): Promise<FsWriteResult>;
     walkFiles(path: string): Promise<WalkedFile[]>;
     searchFiles(path: string, query: string, opts?: SearchOptions): Promise<SearchResult>;
-    readDataUrl(path: string): Promise<FsReadDataUrlResult>;
+    readDataUrl(path: string, source?: ProjectFileScope): Promise<FsReadDataUrlResult>;
     /** Create an empty file at `path`, confined to `root` (project dir). */
-    createFile(root: string, path: string): Promise<FsMutateResult>;
+    createFile(root: string, path: string, scope?: ProjectFileScope): Promise<FsMutateResult>;
     /** Create a directory at `path`, confined to `root`. */
-    createDir(root: string, path: string): Promise<FsMutateResult>;
+    createDir(root: string, path: string, scope?: ProjectFileScope): Promise<FsMutateResult>;
     /** Rename / move `from` to `to`, both confined to `root`. */
-    rename(root: string, from: string, to: string): Promise<FsMutateResult>;
+    rename(root: string, from: string, to: string, scope?: ProjectFileScope): Promise<FsMutateResult>;
     /** Permanently delete `path` (recursive for dirs), confined to `root`. */
-    delete(root: string, path: string): Promise<FsMutateResult>;
+    delete(root: string, path: string, scope?: ProjectFileScope): Promise<FsMutateResult>;
     /**
      * Resolve the remote browse root for a remote-backed project. The host /
      * user / start path come from the store (never the renderer); `projectId`
@@ -1131,9 +1151,9 @@ export interface CcApi {
      * fast. main confines `scope` to the repo before trusting it (Rule 1/2);
      * omit it for a full-tree status.
      */
-    status(path: string, scope?: string[] | null): Promise<GitStatus | null>;
-    showHead(path: string): Promise<GitShowResult>;
-    discard(path: string): Promise<GitDiscardResult>;
+    status(path: string, scope?: string[] | null, source?: ProjectFileScope): Promise<GitStatus | null>;
+    showHead(path: string, source?: ProjectFileScope): Promise<GitShowResult>;
+    discard(path: string, source?: ProjectFileScope, expectedSha256?: string | null): Promise<GitDiscardResult>;
     /** Create a short-lived, main-owned snapshot of every current project change. */
     previewCommit(projectId: string): Promise<{ ok: true; value: GitCommitPreview } | { ok: false; message: string }>;
     /** Commit only the confirmed main-owned write-set; stale previews are rejected. */
@@ -1141,11 +1161,11 @@ export interface CcApi {
     /** Push the current branch of one main-authorized registered local project. */
     pushProject(projectId: string): Promise<GitWorkflowResult>;
     /** Best-effort Git-repository probe. Main remains authoritative at launch. */
-    isRepo(path: string): Promise<boolean>;
+    isRepo(path: string, source?: ProjectFileScope): Promise<boolean>;
     /** List the linked worktrees of the repo containing `path`. */
-    listWorktrees(path: string): Promise<Worktree[]>;
+    listWorktrees(path: string, source?: ProjectFileScope): Promise<Worktree[]>;
     /** List the local branches of the repo containing `path`. */
-    listBranches(path: string): Promise<GitBranch[]>;
+    listBranches(path: string, source?: ProjectFileScope): Promise<GitBranch[]>;
     /**
      * Remove a linked worktree from the repo containing `projectPath`. `force`
      * drops it even with uncommitted/untracked changes (a clean worktree prunes
@@ -1192,6 +1212,7 @@ export interface CcApi {
     }>;
   };
   app: {
+    performance(): Promise<import('./performance.js').RuntimePerformanceSnapshot | null>;
     onMenuEvent(cb: (event: string) => void): () => void;
     homedir(): Promise<string>;
     /** The running app version (package.json `version`), for the About section. */
@@ -1450,9 +1471,13 @@ export interface CcApi {
   };
   library: {
     list(): Promise<LibraryDoc[]>;
+    snapshot(): Promise<import('@zana-ai/zcc-domain/product').LibrarySnapshot>;
+    readAsset(scope: LibraryScope, relPath: string, projectId?: string): Promise<import('@zana-ai/zcc-domain/product').FsReadDataUrlResult>;
+    importFile(input: import('@zana-ai/zcc-domain/product').LibraryImportInput): Promise<LibraryDoc>;
+    onSnapshotChanged(cb: (snapshot: import('@zana-ai/zcc-domain/product').LibrarySnapshot) => void): () => void;
     add(input: LibraryAddInput): Promise<LibraryDoc | null>;
-    update(id: string, patch: Partial<Pick<LibraryDoc, 'title' | 'summary' | 'tags'>>): Promise<LibraryDoc | null>;
-    remove(id: string): Promise<boolean>;
+    update(id: string, patch: Partial<Pick<LibraryDoc, 'title' | 'summary' | 'tags'>>, location?: import('@zana-ai/zcc-domain/product').LibraryDocLocation): Promise<LibraryDoc | null>;
+    remove(id: string, location?: import('@zana-ai/zcc-domain/product').LibraryDocLocation): Promise<boolean>;
     reveal(scope: LibraryScope, projectId?: string): Promise<{ ok: boolean; path: string; message?: string }>;
     /** Full-text search of document bodies across both scopes (bounded). */
     search(query: string): Promise<LibrarySearchResult>;
@@ -1464,7 +1489,7 @@ export interface CcApi {
      */
     read(scope: LibraryScope, relPath: string, projectId?: string): Promise<FsReadResult>;
     /** Write a doc's content by scope + relPath (edit-save twin of `read`). */
-    write(scope: LibraryScope, relPath: string, content: string, projectId?: string): Promise<FsWriteResult>;
+    write(scope: LibraryScope, relPath: string, content: string, projectId?: string, expectedSha256?: string): Promise<FsWriteResult>;
     /** Create a folder at scope+relPath (and missing parents) — the folder tree's "New folder". */
     createFolder(scope: LibraryScope, relPath: string, projectId?: string): Promise<FsMutateResult>;
     /** Move/rename a file or folder, possibly across scopes (e.g. project doc -> Global). */
@@ -1695,6 +1720,8 @@ export interface CcApi {
     delete(id: string): Promise<Result<true>>;
     setEnabled(id: string, enabled: boolean): Promise<Result<ScheduledTask>>;
     runNow(id: string): Promise<Result<ScheduledTask>>;
+    /** Check reserved workers without starting or enabling work. False means still unconfirmed. */
+    reconcile(id: string): Promise<Result<boolean>>;
     onChanged(cb: (tasks: ScheduledTask[]) => void): () => void;
     listTemplates(): Promise<ScheduleTemplate[]>;
     onTemplatesChanged(cb: (templates: ScheduleTemplate[]) => void): () => void;
@@ -1724,6 +1751,8 @@ export interface CcApi {
     setStatus(id: string, status: GoalStatus): Promise<Result<Goal>>;
     /** Force one iteration now, regardless of cadence. */
     runNow(id: string): Promise<Result<Goal>>;
+    /** Check reserved workers without starting or resuming work. False means still unconfirmed. */
+    reconcile(id: string): Promise<Result<boolean>>;
     onChanged(cb: (goals: Goal[]) => void): () => void;
   };
   /**

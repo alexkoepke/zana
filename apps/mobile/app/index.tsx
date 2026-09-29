@@ -11,6 +11,7 @@ import {
   View
 } from 'react-native';
 import { Redirect, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import Constants from 'expo-constants';
 import * as Haptics from 'expo-haptics';
 import * as Notifications from 'expo-notifications';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -24,6 +25,7 @@ import {
 import { useProfiles } from '../src/state';
 import { Action, Label, Screen, useColors } from '../src/ui';
 import { useNativeSession } from '../src/session';
+import { isOnlineProfile } from '../src/lib/profiles';
 import { PairingRequired } from '../src/lib/client';
 import { externalUrl, isSameServer, safePath } from '../src/lib/urls';
 import { resolveShellLoadPath, shellPathFromUrl } from '../src/lib/shell-path';
@@ -102,9 +104,9 @@ export default function Home() {
   const handshake = useMemo<NativeShellHandshake>(
     () => ({
       bridgeVersion: MOBILE_BRIDGE_VERSION,
-      appVersion: '0.1.0',
+      appVersion: Constants.nativeAppVersion ?? Constants.expoConfig?.version ?? '0',
       platform: Platform.OS === 'ios' ? 'ios' : 'android',
-      profileMode: profile?.credential ? 'connect' : 'direct',
+      profileMode: 'connect',
       secureContext: profile?.serverUrl.startsWith('https:') ?? false,
       safeArea: { top: 0, right: 0, bottom: 0, left: 0 },
       capabilities: ['haptic', 'badge', 'share', 'open-external', 'open-native', 'safe-area']
@@ -119,7 +121,7 @@ export default function Home() {
       </Screen>
     );
   if (!ready) return <ActivityIndicator style={{ flex: 1 }} color={c.accent} />;
-  if (!profile) return <Redirect href="/connect" />;
+  if (!profile || !isOnlineProfile(profile) || state.phoneLogin) return <Redirect href="/connect" />;
   if (unknownServer)
     return (
       <Screen>
@@ -191,10 +193,10 @@ export default function Home() {
           <Screen>
             <Label>{error}</Label>
             <Action
-              title={authError ? 'Pair again' : 'Try again'}
+              title={authError ? 'Sign in again' : 'Try again'}
               onPress={() =>
                 authError
-                  ? router.push({ pathname: '/connect', params: { server: profile.serverUrl } })
+                  ? router.push('/connect')
                   : reconnect()
               }
             />

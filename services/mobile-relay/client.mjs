@@ -1,11 +1,13 @@
 import { request } from 'node:http';
 import { WebSocket } from 'ws';
-import { TUNNEL_PATH, LIMITS, headers, validPath, parseFrame, send, dataFrames, bytes, heartbeat, remoteOrigin, validToken } from './protocol.mjs';
+import { isMachinePath, machineIdentity } from './machine-routes.mjs';
+import { TUNNEL_PATH, LIMITS, headers, validPath, parseFrame, send, dataFramesFlushed, bytes, heartbeat, remoteOrigin, validToken } from './protocol.mjs';
 
 /** Dials ONLY the supplied loopback mobile gateway, never the product server or a frame-supplied host. */
-export function connectRelay({ publicUrl, token, gatewayPort, allowLocal = false, onState = () => {}, retryMs = 1000, heartbeatMs = 20_000, helloTimeoutMs = 10_000 }) {
+export function connectRelay({ publicUrl, token, gatewayPort, gatewayCredential, productInstanceId, allowLocal = false, onState = () => {}, retryMs = 1000, heartbeatMs = 20_000, helloTimeoutMs = 10_000 }) {
   const origin = remoteOrigin(publicUrl, allowLocal);
   if (!validToken(token)) throw new Error('Invalid relay token');
+  if (gatewayCredential !== undefined && !validToken(gatewayCredential)) throw new Error('Invalid local gateway credential');
   if (!Number.isInteger(gatewayPort) || gatewayPort < 1 || gatewayPort > 65535) throw new Error('Invalid gateway port');
   const target = new URL(TUNNEL_PATH, origin);
   target.protocol = origin.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -28,9 +30,14 @@ export function connectRelay({ publicUrl, token, gatewayPort, allowLocal = false
   const dial = () => {
     if (stopped) return;
     update('connecting');
-    const ws = new WebSocket(target, { headers: { authorization: `Bearer ${token}` }, handshakeTimeout: 10_000, maxPayload: LIMITS.frame, perMessageDeflate: false, followRedirects: false });
+    const ws = new WebSocket(target, { headers: { authorization: `Bearer ${token}`, ...(productInstanceId ? { 'x-zcc-relay-machine-version': '1', 'x-zcc-product-instance': productInstanceId } : {}) }, handshakeTimeout: 10_000, maxPayload: LIMITS.frame, perMessageDeflate: false, followRedirects: false });
     let ready = false;
     let helloTimer;
+    // All HTTP responses share one socket budget. Pause each producer and drain
+    // one chunk at a time, so concurrent app assets cannot overflow the tunnel.
+    let responseWrites = Promise.resolve();
+    let pendingResponseBytes = 0;
+    let pendingResponseWrites = 0;
     socket = ws;
     ws.on('open', () => {
       heartbeat(ws, heartbeatMs);
@@ -58,6 +65,16 @@ export function connectRelay({ publicUrl, token, gatewayPort, allowLocal = false
         if (frame.type === 'request' || frame.type === 'ws-open') {
           if (streams.has(frame.id) || streams.size >= LIMITS.streams) throw new Error('Too many streams');
           const incoming = { ...headers(frame.headers), host: origin.host };
+          const machine = gatewayCredential ? machineIdentity(incoming) : null;
+          const path = frame.type === 'ws-open' ? frame.path ?? '/ws' : frame.path;
+          if (machine && !isMachinePath(frame.type === 'ws-open' ? 'GET' : frame.method, path, frame.type === 'ws-open')) throw new Error('Invalid machine route');
+          // Only the authenticated outbound tunnel can mint this local capability.
+          // It is never accepted from a phone or transported across the relay.
+          if (gatewayCredential) {
+            delete incoming.cookie;
+            if (!machine) delete incoming.authorization;
+            incoming['x-zcc-connect-gateway'] = gatewayCredential;
+          }
           if (frame.type === 'request') {
             if (!validPath(frame.path) || !['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(frame.method)) throw new Error('Invalid request');
             const stream = { size: 0, ended: false };
@@ -69,19 +86,36 @@ export function connectRelay({ publicUrl, token, gatewayPort, allowLocal = false
               try { send(ws, { type: 'response', id: frame.id, status: response.statusCode, headers: headers(response.headers, true) }); }
               catch { send(ws, { type: 'error', id: frame.id }); dispose(frame.id); return; }
               response.on('data', chunk => {
+                response.pause();
                 size += chunk.length;
-                if (size > LIMITS.response || !dataFrames(ws, 'response-data', frame.id, chunk)) {
+                if (size > LIMITS.response || pendingResponseBytes + chunk.length > LIMITS.buffer || pendingResponseWrites >= LIMITS.streams) {
                   send(ws, { type: 'error', id: frame.id }); dispose(frame.id);
+                  return;
                 }
+                pendingResponseBytes += chunk.length;
+                pendingResponseWrites++;
+                const active = () => streams.get(frame.id) === stream;
+                responseWrites = responseWrites.then(async () => {
+                  const sent = await dataFramesFlushed(ws, 'response-data', frame.id, chunk, active);
+                  if (!active()) return;
+                  if (sent) response.resume();
+                  else { send(ws, { type: 'error', id: frame.id }); dispose(frame.id); }
+                }).catch(() => { if (active()) { send(ws, { type: 'error', id: frame.id }); dispose(frame.id); } })
+                  .finally(() => { pendingResponseBytes -= chunk.length; pendingResponseWrites--; });
+                stream.responseWrite = responseWrites;
               });
-              response.on('end', () => { if (streams.delete(frame.id)) send(ws, { type: 'response-end', id: frame.id }); });
+              response.on('end', async () => {
+                await stream.responseWrite;
+                if (streams.delete(frame.id)) send(ws, { type: 'response-end', id: frame.id });
+              });
               response.on('error', () => { if (streams.has(frame.id)) { send(ws, { type: 'error', id: frame.id }); dispose(frame.id); } });
             });
             stream.request = local;
             local.on('timeout', () => local.destroy(new Error('Timeout')));
             local.on('error', () => { if (streams.has(frame.id)) { send(ws, { type: 'error', id: frame.id }); dispose(frame.id); } });
           } else {
-            const local = new WebSocket(`ws://127.0.0.1:${gatewayPort}/ws`, { headers: incoming, handshakeTimeout: 10_000, maxPayload: 1024 * 1024, perMessageDeflate: false });
+            if (!machine && !['/ws', '/ws/'].includes(path)) throw new Error('Invalid socket route');
+            const local = new WebSocket(`ws://127.0.0.1:${gatewayPort}${path}`, { headers: incoming, handshakeTimeout: 10_000, maxPayload: 1024 * 1024, perMessageDeflate: false });
             const stream = { ws: local, queued: [], queuedBytes: 0 };
             streams.set(frame.id, stream);
             local.on('open', () => { for (const queued of stream.queued) local.send(queued.data, { binary: queued.binary }); stream.queued = []; stream.queuedBytes = 0; });

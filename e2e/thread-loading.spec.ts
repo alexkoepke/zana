@@ -152,6 +152,120 @@ for (const outcome of ['success', 'failure'] as const) {
   });
 }
 
+test('unanswered conversation requests time out and Retry recovers without reopening the thread', async ({ app }) => {
+  const { window, home } = app;
+  const threadId = await createLoadingThread(window, home);
+  let recovering = false;
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const failedReads: string[] = [];
+  window.on('requestfailed', (request) => {
+    if (request.url().includes(`/threads/${threadId}`)) failedReads.push(new URL(request.url()).pathname);
+  });
+  await window.route((url) => [
+    `/api/v1/threads/${threadId}`, `/api/v1/threads/${threadId}/timeline`
+  ].includes(url.pathname), async (route) => {
+    if (recovering) return route.continue();
+    const response = await route.fetch();
+    await gate;
+    // The renderer cancels these requests at its deadline; tolerate cleanup of
+    // an already-aborted route after the successful retry has been displayed.
+    await route.fulfill({ response }).catch(() => {});
+  });
+  try {
+    await window.evaluate((id) => {
+      history.pushState({}, '', `/threads/${id}`);
+      dispatchEvent(new PopStateEvent('popstate'));
+    }, threadId);
+    const detail = window.getByTestId('thread-detail');
+    const timeline = detail.getByTestId('thread-timeline');
+    const error = detail.getByTestId('thread-timeline-load-error');
+    await expect(timeline.getByTestId('thread-loading')).toBeVisible();
+    await expect(error).toContainText('The server is taking too long', { timeout: 25_000 });
+    await expect(timeline).toHaveAttribute('aria-busy', 'false');
+    await expect(timeline.getByTestId('thread-loading')).toHaveCount(0);
+    await expect.poll(() => new Set(failedReads).size).toBe(2);
+    await expect(detail.locator('.thread-detail-header')).not.toContainText('Working');
+
+    recovering = true;
+    await error.getByRole('button', { name: 'Retry' }).click();
+    await expect(timeline).toContainText('Response to: Hello from the loading test');
+    await expect(error).toHaveCount(0);
+  } finally {
+    release();
+  }
+});
+
+test('a background refresh keeps the retryable error visible until the conversation recovers', async ({ app }) => {
+  const { window, home } = app;
+  const threadId = await createLoadingThread(window, home);
+  let refresh = false;
+  let refreshRequested = false;
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  await window.route((url) => url.pathname === `/api/v1/threads/${threadId}/timeline`, async (route) => {
+    if (!refresh) return route.fulfill({ status: 503, json: { error: 'Conversation temporarily unavailable' } });
+    refreshRequested = true;
+    const response = await route.fetch();
+    await gate;
+    await route.fulfill({ response });
+  });
+  try {
+    await window.evaluate((id) => {
+      history.pushState({}, '', `/threads/${id}`);
+      dispatchEvent(new PopStateEvent('popstate'));
+    }, threadId);
+    const detail = window.getByTestId('thread-detail');
+    const error = detail.getByTestId('thread-timeline-load-error');
+    await expect(error).toBeVisible();
+    refresh = true;
+    // A real server event invokes the same coalesced refresh used by streamed
+    // conversation updates, while its replacement timeline request is held.
+    await window.evaluate(async (id) => {
+      await fetch(`/api/v1/threads/${id}/read`, { method: 'POST' });
+    }, threadId);
+    await expect.poll(() => refreshRequested).toBe(true);
+    await expect(error).toBeVisible();
+    await expect(detail.getByTestId('thread-loading')).toHaveCount(0);
+  } finally {
+    release();
+  }
+  await expect(window.getByTestId('thread-timeline')).toContainText('Response to: Hello from the loading test');
+  await expect(window.getByTestId('thread-timeline-load-error')).toHaveCount(0);
+});
+
+test('leaving a conversation cancels its pending reads immediately', async ({ app }) => {
+  const { window, home } = app;
+  const threadId = await createLoadingThread(window, home);
+  const timelinePath = `/api/v1/threads/${threadId}/timeline`;
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let aborted = false;
+  window.on('requestfailed', (request) => {
+    if (new URL(request.url()).pathname === timelinePath) aborted = true;
+  });
+  await window.route((url) => url.pathname === timelinePath, async (route) => {
+    const response = await route.fetch();
+    await gate;
+    await route.fulfill({ response }).catch(() => {});
+  });
+  try {
+    await window.evaluate((id) => {
+      history.pushState({}, '', `/threads/${id}`);
+      dispatchEvent(new PopStateEvent('popstate'));
+    }, threadId);
+    await expect(window.getByTestId('thread-loading')).toBeVisible();
+    await window.evaluate(() => {
+      history.pushState({}, '', '/');
+      dispatchEvent(new PopStateEvent('popstate'));
+    });
+    await expect(window.getByTestId('thread-detail')).toHaveCount(0);
+    await expect.poll(() => aborted, { timeout: 3_000 }).toBe(true);
+  } finally {
+    release();
+  }
+});
+
 test('opening a tool-heavy thread fetches output only for the expanded row', async ({ app }, testInfo) => {
   const { window, home } = app;
   const threadId = await createLoadingThread(window, home);

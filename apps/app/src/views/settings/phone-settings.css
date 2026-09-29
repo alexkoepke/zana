@@ -23,6 +23,22 @@
   color: var(--text-primary);
 }
 
+.phone-install-notice {
+  padding: 12px 14px;
+  border-left: 3px solid var(--accent-blue);
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
+.phone-install-alternative {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
 .phone-install-device-help {
   font-size: 13px;
   line-height: 1.6;
@@ -43,7 +59,15 @@
   flex-wrap: wrap;
 }
 
-.phone-connection-settings { margin: 20px 0; padding: 16px; border: 1px solid var(--border); border-radius: 12px; }
-.phone-connection-settings label { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
-.phone-connection-settings input, .phone-connection-settings select { width: 100%; min-width: 0; min-height: 44px; padding: 8px 12px; color: var(--text-primary); background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px; font: inherit; }
-.phone-connection-command { display: block; padding: 10px; overflow-wrap: anywhere; background: var(--bg-elevated); border-radius: 8px; }
+
+.phone-setup-progress { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; list-style: none; padding: 0; margin: 0 0 20px; font-size: 12px; }
+.phone-setup-progress li { display: flex; align-items: center; gap: 8px; padding: 10px; border-bottom: 2px solid var(--border); color: var(--text-muted); }
+.phone-setup-progress li[aria-current] { color: var(--text-primary); border-color: var(--accent-blue); font-weight: 600; }
+.phone-setup-progress span { font-weight: 700; }
+.phone-setup-stage { border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin: 16px 0; }
+.phone-setup-stage h2 { font-size: 15px; margin: 0 0 12px; }
+.phone-setup-stage .btn { margin: 4px 8px 4px 0; }
+.phone-install-qr { display: block; margin: 12px 0; border-radius: 8px; }
+.phone-ready-session { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; font-size: 13px; }
+.phone-setup-success { font-weight: 600; color: var(--text-primary); }
+@media (max-width: 600px) { .phone-setup-progress { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

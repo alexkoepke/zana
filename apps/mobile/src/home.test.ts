@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import Home from '../app/index';
 
 const fixture = vi.hoisted(() => ({
+  legacy: false,
   params: {} as { path?: string },
   session: { revision: 0, ready: true, error: null, resumeRevision: 0, reconnect: vi.fn() },
   push: vi.fn(), share: vi.fn().mockResolvedValue({}), menu: vi.fn()
@@ -18,6 +19,7 @@ vi.mock('expo-router', () => ({
   Redirect: 'Redirect', useFocusEffect: () => {},
   useLocalSearchParams: () => fixture.params, useRouter: () => ({ push: fixture.push })
 }));
+vi.mock('expo-constants', () => ({ default: { nativeAppVersion: '2.3.0', expoConfig: { version: '9.9.9' } } }));
 vi.mock('expo-haptics', () => ({}));
 vi.mock('expo-notifications', () => ({}));
 vi.mock('react-native-safe-area-context', () => ({ SafeAreaView: 'SafeAreaView' }));
@@ -28,7 +30,7 @@ vi.mock('./ui', () => ({
 }));
 vi.mock('./session', () => ({ useNativeSession: () => fixture.session }));
 vi.mock('./state', () => ({ useProfiles: () => ({
-  state: { activeId: 'office', profiles: [{ id: 'office', label: 'Office Mac', serverUrl: 'https://mac.example' }] },
+  state: { activeId: 'office', profiles: [{ id: 'office', label: 'Office Mac', serverUrl: fixture.legacy ? 'http://192.168.1.2:8785' : 'https://s-aaaaaaaaaaaaaaaaaaaaaaaa.connect.example.com', credential: 'c'.repeat(43), deviceId: 'phone', accountUrl: 'https://example.com', ...(fixture.legacy ? {} : { connectDomain: 'connect.example.com' }) }] },
   ready: true, update: vi.fn()
 }) }));
 vi.mock('./lib/connection-menu', () => ({ showConnectionMenu: fixture.menu }));
@@ -36,13 +38,14 @@ vi.mock('./lib/connection-menu', () => ({ showConnectionMenu: fixture.menu }));
 let renderer: ReactTestRenderer;
 const web = () => renderer.root.findByType('WebView' as never);
 const nativeMenu = () => renderer.root.findAllByProps({ accessibilityLabel: 'Connection options' });
-const send = async (data: unknown, url = 'https://mac.example') => {
+const send = async (data: unknown, url = 'https://s-aaaaaaaaaaaaaaaaaaaaaaaa.connect.example.com') => {
   await act(() => web().props.onMessage({ nativeEvent: { data: JSON.stringify(data), url } }));
 };
 beforeEach(async () => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   vi.clearAllMocks();
   vi.stubGlobal('__DEV__', true);
+  fixture.legacy = false;
   fixture.params = {};
   fixture.session.revision = 0;
   fixture.session.ready = true;
@@ -68,14 +71,14 @@ it('retires the native header only when a trusted page hosts its own menu', asyn
 
 it('shares the current path without remounting the page and reconnects through the session owner', async () => {
   const original = web();
-  await act(() => original.props.onNavigationStateChange({ canGoBack: true, url: 'https://mac.example/threads/123' }));
+  await act(() => original.props.onNavigationStateChange({ canGoBack: true, url: 'https://s-aaaaaaaaaaaaaaaaaaaaaaaa.connect.example.com/threads/123' }));
   expect(web()).toBe(original);
-  expect(web().props.source).toEqual({ uri: 'https://mac.example/' });
+  expect(web().props.source).toEqual({ uri: 'https://s-aaaaaaaaaaaaaaaaaaaaaaaa.connect.example.com/' });
   await send({ type: 'open-native', screen: 'connection-menu' });
   const actions = fixture.menu.mock.calls[0]![0];
   expect(actions.label).toBe('Office Mac');
   await act(() => actions.share());
-  expect(fixture.share).toHaveBeenCalledWith({ message: 'https://mac.example/threads/123', url: 'https://mac.example/threads/123' });
+  expect(fixture.share).toHaveBeenCalledWith({ message: 'https://s-aaaaaaaaaaaaaaaaaaaaaaaa.connect.example.com/threads/123', url: 'https://s-aaaaaaaaaaaaaaaaaaaaaaaa.connect.example.com/threads/123' });
   await act(() => actions.reload());
   expect(fixture.session.reconnect).toHaveBeenCalledOnce();
   actions.settings();
@@ -86,7 +89,7 @@ it('keeps fallback actions usable before the page loads and after a load error',
   await act(() => nativeMenu()[0]!.props.onPress());
   fixture.share.mockRejectedValueOnce(new Error('cancelled'));
   await act(() => fixture.menu.mock.calls[0]![0].share());
-  expect(fixture.share).toHaveBeenCalledWith({ message: 'https://mac.example/', url: 'https://mac.example/' });
+  expect(fixture.share).toHaveBeenCalledWith({ message: 'https://s-aaaaaaaaaaaaaaaaaaaaaaaa.connect.example.com/', url: 'https://s-aaaaaaaaaaaaaaaaaaaaaaaa.connect.example.com/' });
   await send({ type: 'shell-chrome', visible: true });
   await act(() => web().props.onError({ nativeEvent: { description: 'Offline' } }));
   expect(nativeMenu()).toHaveLength(1);
@@ -103,5 +106,16 @@ it('restores fallback controls for a new session or deep link', async () => {
   fixture.params = { path: '/threads/456' };
   await act(() => renderer.update(createElement(Home)));
   expect(nativeMenu()).toHaveLength(1);
-  expect(web().props.source.uri).toBe('https://mac.example/threads/456');
+  expect(web().props.source.uri).toBe('https://s-aaaaaaaaaaaaaaaaaaaaaaaa.connect.example.com/threads/456');
+});
+
+it("reports the installed native app version in the bridge", () => {
+  expect(web().props.injectedJavaScriptBeforeContentLoaded).toContain('"appVersion":"2.3.0"');
+});
+
+it('never mounts a WebView for a saved local connection even with stale session readiness', async () => {
+  fixture.legacy = true;
+  await act(() => renderer.update(createElement(Home)));
+  expect(renderer.root.findAllByType('WebView' as never)).toHaveLength(0);
+  expect(renderer.root.findByType('Redirect' as never).props.href).toBe('/connect');
 });

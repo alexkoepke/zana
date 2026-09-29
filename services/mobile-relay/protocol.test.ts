@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { WebSocket } from 'ws';
-import { LIMITS, headers, validPath, parseFrame, send, dataFrames, bytes, heartbeat, remoteOrigin, validToken } from './protocol.mjs';
+import { LIMITS, headers, validPath, parseFrame, send, dataFrames, dataFramesFlushed, bytes, heartbeat, remoteOrigin, validToken } from './protocol.mjs';
 
 afterEach(() => vi.useRealTimers());
 function socket() { return Object.assign(new EventEmitter(), { readyState: WebSocket.OPEN, bufferedAmount: 0, send: vi.fn(), terminate: vi.fn(), ping: vi.fn() }); }
@@ -43,6 +43,23 @@ describe('bounded relay protocol', () => {
     ws.emit('pong'); vi.advanceTimersByTime(100); expect(ws.ping).toHaveBeenCalledTimes(2);
     vi.advanceTimersByTime(100); expect(ws.terminate).toHaveBeenCalledOnce();
     ws.emit('close'); expect(vi.getTimerCount()).toBe(0); expect(ws.listenerCount('pong')).toBe(0);
+  });
+  it('waits for each response frame to flush and stops on cancellation or send failure', async () => {
+    const ws = socket(); const active = vi.fn(() => true);
+    const pending = dataFramesFlushed(ws, 'response-data', 1, Buffer.alloc(LIMITS.chunk + 5), active);
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    ws.send.mock.calls[0][1](); await Promise.resolve();
+    expect(ws.send).toHaveBeenCalledTimes(2);
+    expect(bytes(JSON.parse(ws.send.mock.calls[1][0]))).toHaveLength(5);
+    ws.send.mock.calls[1][1](); expect(await pending).toBe(true);
+    const cancelled = dataFramesFlushed(ws, 'response-data', 2, Buffer.alloc(LIMITS.chunk + 1), active);
+    active.mockReturnValue(false); ws.send.mock.calls[2][1]();
+    expect(await cancelled).toBe(false); expect(ws.send).toHaveBeenCalledTimes(3);
+    active.mockReturnValue(true);
+    const failed = dataFramesFlushed(ws, 'response-data', 3, Buffer.from('x'), active);
+    ws.send.mock.calls[3][1](new Error('closed')); expect(await failed).toBe(false);
+    ws.readyState = WebSocket.CLOSED;
+    expect(await dataFramesFlushed(ws, 'response-data', 4, Buffer.from('x'), active)).toBe(false);
   });
   it('requires HTTPS and a strong token outside explicit local tests', () => {
     expect(remoteOrigin('https://relay.example').origin).toBe('https://relay.example');

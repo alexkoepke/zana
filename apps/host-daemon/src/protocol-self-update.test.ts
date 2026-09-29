@@ -16,9 +16,10 @@ async function fixture() {
   await writeFile(join(source, 'join.mjs'), `import './bb-provider-bridge-worker.mjs'; process.exit(Number(process.argv[3]) === ${protocol + 1} ? 0 : 1);`);
   await writeFile(join(source, 'bb-provider-bridge-worker.mjs'), 'export const worker = true;');
   await writeFile(join(source, 'bb-pi-bridge.mjs'), 'export const pi = true;');
+  await writeFile(join(source, 'zcc-plugin-host-worker.mjs'), 'export const worker = true;');
   const pack = async (extra: string[] = []) => {
     const file = join(root, 'update.tgz');
-    await create({ file, cwd: source, gzip: true, portable: true }, ['package.json', 'join.mjs', 'bb-provider-bridge-worker.mjs', 'bb-pi-bridge.mjs', ...extra]);
+    await create({ file, cwd: source, gzip: true, portable: true }, ['package.json', 'join.mjs', 'bb-provider-bridge-worker.mjs', 'bb-pi-bridge.mjs', 'zcc-plugin-host-worker.mjs', ...extra]);
     return readFile(file);
   };
   const archive = await pack();

@@ -36,6 +36,7 @@ import { AboutTab } from '@/views/settings/AboutView';
 import { MachinesTab } from '@/views/settings/MachinesSettingsView';
 import { ConnectivityTab } from '@/views/settings/ConnectivityView';
 import { PhoneTab } from '@/views/settings/PhoneSettingsView';
+import { RemoteAccessView } from '@/views/settings/RemoteAccessView';
 import { InboxSettingsTab } from '@/views/settings/InboxSettingsView';
 import { KeyboardSettingsSection } from '@/views/settings/KeyboardSettingsSection';
 import { ComposerSettingsView } from '@/views/settings/ComposerSettingsView';
@@ -44,6 +45,7 @@ import { ProjectTab } from '@/views/settings/ProjectSettingsView';
 import { PersonasPanel } from '@/views/settings/PersonasView';
 import { SquadsPanel } from '@/views/settings/SquadsView';
 import { UsagePanel } from '@/views/settings/UsageView';
+import { PerformanceSettingsView } from './PerformanceSettingsView.js';
 import './settings.css';
 
 /**
@@ -92,11 +94,13 @@ export const SETTINGS_SECTIONS: Array<{
   { id: 'machines', label: 'Machines', icon: Laptop, desc: 'Pair remote host daemons', group: 'remote' },
   { id: 'connectivity', label: 'Connectivity', icon: Network, desc: 'Unpaired SSH fallback', group: 'remote' },
   { id: 'phone', label: 'Phone', icon: Smartphone, desc: 'Pair a mobile device', group: 'remote' },
+  { id: 'remote-access', label: 'Remote access', icon: Globe, desc: 'Open this computer from any browser', group: 'remote' },
   { id: 'agents', label: 'Agents', icon: Bot, desc: 'Attention, automation, heartbeat & Overseer', group: 'agents' },
   { id: 'personas', label: 'Personas', icon: Drama, desc: 'Reusable launch profiles', group: 'agents' },
   { id: 'squads', label: 'Squads', icon: Users, desc: 'Reusable multi-agent squads', group: 'agents' },
   { id: 'usage', label: 'Usage', icon: BarChart3, desc: 'Session activity rollup', group: 'catalogues' },
   { id: 'experimental', label: 'Experimental', icon: FlaskConical, desc: 'Opt-in features under evaluation', group: 'labs' },
+  { id: 'performance', label: 'Performance', icon: BarChart3, desc: 'Host daemon resources, workload, and connection health', group: 'app' },
   { id: 'about', label: 'About', icon: Info, desc: 'Version, updates, credits & release notes', group: 'app' }
 ];
 
@@ -109,6 +113,11 @@ export const SETTINGS_SECTIONS: Array<{
  * blocks to target.
  */
 export const SETTINGS_SUBSECTIONS: Partial<Record<SettingsTab, Array<{ id: string; label: string }>>> = {
+  performance: [
+    { id: 'performance-trends', label: 'Daemon trends' },
+    { id: 'performance-work', label: 'Current work' },
+    { id: 'performance-connection', label: 'Connection & diagnostics' }
+  ],
   agents: [
     { id: 'agent-guidance', label: 'Agent guidance' },
     { id: 'git-worktrees', label: 'Git worktrees' },
@@ -381,7 +390,7 @@ export function SettingsView() {
   return (
     <div className="settings-panel settings-panel--preferences">
       <div className={`settings-inner${WIDE_TABS.has(tab) ? ' settings-inner--wide' : ''}`}>
-        <header className="settings-header">
+        {tab !== 'remote-access' && <header className="settings-header">
           <div className="settings-header-title">
             <h1>{tab === 'project' ? 'Project settings' : meta?.label ?? 'Settings'}</h1>
             {meta?.desc && tab !== 'project' && (
@@ -395,7 +404,7 @@ export function SettingsView() {
               allowGlobal={allowGlobalScope}
             />
           )}
-        </header>
+        </header>}
 
         {tab === 'global' ? (
           <GlobalTab
@@ -434,6 +443,8 @@ export function SettingsView() {
           <SquadsPanel />
         ) : tab === 'usage' ? (
           <UsagePanel />
+        ) : tab === 'performance' ? (
+          <PerformanceSettingsView />
         ) : tab === 'experimental' ? (
           <ExperimentalTab
             config={config}
@@ -454,6 +465,8 @@ export function SettingsView() {
             onConfigDraft={setConfig}
             onUpdate={update}
           />
+        ) : tab === 'remote-access' ? (
+          <RemoteAccessView config={config} onConfigDraft={setConfig} />
         ) : tab === 'phone' ? (
           <PhoneTab
             config={config}

@@ -20,7 +20,7 @@ describe('real bundled host replacement', () => {
     const root = mkdtempSync(join(tmpdir(), 'zcc-real-update-'));
     const dataDir = join(root, 'machine'), runtime = join(dataDir, 'runtime');
     mkdirSync(runtime, { recursive: true });
-    const artifact = resolveHostArtifact({ ...process.env, ZCC_HOST_ARTIFACT: '' });
+    const artifact = await resolveHostArtifact({ ...process.env, ZCC_HOST_ARTIFACT: '' });
     execFileSync('tar', ['-xzf', artifact.tarballPath, '-C', runtime]);
     const entry = join(runtime, 'join.mjs');
     const source = readFileSync(entry, 'utf8');
@@ -54,7 +54,7 @@ describe('real bundled host replacement', () => {
     const children: ChildProcess[] = [];
     let replacementPid: number | undefined;
     const launch = () => {
-      const child = spawn(process.execPath, [entry, 'join', '--join-code', 'test', '--server-url', serverUrl, '--host-daemon-port', String(port), '--auto-update'], {
+      const child = spawn(process.execPath, [entry, 'join', '--join-code', 'test', '--host-id', hostId, '--server-url', serverUrl, '--host-daemon-port', String(port), '--auto-update'], {
         cwd: root, stdio: 'ignore', env: { ...process.env, HOME: root, ZCC_DATA_DIR: dataDir, ZCC_HOST_SERVICE_MANAGED: managed ? '1' : '0' }
       }); children.push(child); return child;
     };

@@ -7,13 +7,14 @@ import { promisify } from 'node:util';
 import { list, extract } from 'tar';
 import { HOST_RPC_PROTOCOL_VERSION } from '@zana-ai/zcc-contracts/host-rpc';
 import { joinServerUrl } from './server-url.js';
+import { connectHostFetch, readConnectHostAccess } from './connect-access.js';
 
 export const SELF_UPDATE_INITIAL_RETRY_DELAY_MS = 5_000;
 export const SELF_UPDATE_MAX_RETRY_DELAY_MS = 5 * 60 * 1000;
 export const SELF_UPDATE_MAX_BYTES = 16 * 1024 * 1024;
 const MAX_UNPACKED_BYTES = 64 * 1024 * 1024;
 const TIMEOUT_MS = 30_000;
-const FILES = new Set(['package.json', 'join.mjs', 'bb-provider-bridge-worker.mjs', 'bb-pi-bridge.mjs']);
+const FILES = new Set(['package.json', 'join.mjs', 'bb-provider-bridge-worker.mjs', 'bb-pi-bridge.mjs', 'zcc-plugin-host-worker.mjs']);
 interface UpdateAttempt { attemptedAt: number; attemptCount: number; protocolVersion: number }
 interface PendingUpdate { entry: string; backup: string; generation: string }
 export type ProtocolSelfUpdateResult = 'failed' | 'skipped' | 'updated' | 'backoff';
@@ -86,7 +87,7 @@ async function update(options: Options): Promise<ProtocolSelfUpdateResult> {
   }
   // Record before I/O, including failed metadata requests, to bound retry storms.
   await atomicJson(attemptFile, { attemptedAt: now, attemptCount: (previous?.attemptCount ?? 0) + 1, protocolVersion: HOST_RPC_PROTOCOL_VERSION });
-  const fetchFn = options.fetchFn ?? fetch;
+  const fetchFn = connectHostFetch(options.serverUrl, readConnectHostAccess(options.dataDir, options.serverUrl)?.credential, options.fetchFn ?? fetch);
   const signal = AbortSignal.timeout(TIMEOUT_MS);
   const metadata = JSON.parse((await readBounded(await fetchFn(joinServerUrl(options.serverUrl, '/install/version'), { signal, redirect: 'error' }), 4096)).toString());
   const remote = metadata.protocolVersion;

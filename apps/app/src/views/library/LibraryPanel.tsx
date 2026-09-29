@@ -1,3 +1,6 @@
+import { useLibraryBodySearch } from './library/useLibraryBodySearch.js';
+import { LibraryAvailability } from './library/LibraryAvailability.js';
+import { LibraryImportButton } from './library/LibraryImportButton.js';
 import { product } from '../../lib/product-client.js';
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -62,6 +65,7 @@ export function LibraryPanel({ deepLink = null }: { deepLink?: LibraryDeepLink |
 
   const { compact, selectedDoc, setSelectedDoc, readerOpen, backToDocuments, rootRef, backRef } = useLibraryNavigation();
   const [searchQuery, setSearchQuery] = useState('');
+  const { hits: bodyHits, searching: bodySearching, warning: searchWarning } = useLibraryBodySearch(searchQuery);
   const [expanded, setExpanded] = useState<Set<string>>(new Set(['global']));
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
   const [prompt, setPrompt] = useState<PromptState | null>(null);
@@ -80,9 +84,10 @@ export function LibraryPanel({ deepLink = null }: { deepLink?: LibraryDeepLink |
         doc.title.toLowerCase().includes(q) ||
         doc.relPath.toLowerCase().includes(q) ||
         doc.summary?.toLowerCase().includes(q) ||
-        doc.tags?.some((tag) => tag.toLowerCase().includes(q))
+        doc.tags?.some((tag) => tag.toLowerCase().includes(q)) ||
+        bodyHits.has(doc.id) || (doc.absPath ? bodyHits.has(doc.absPath) : false)
     );
-  }, [docs, searchQuery]);
+  }, [docs, searchQuery, bodyHits]);
 
   const tree = useMemo(
     () => buildLibraryTree(filteredDocs, phantomFolders),
@@ -400,11 +405,12 @@ export function LibraryPanel({ deepLink = null }: { deepLink?: LibraryDeepLink |
       <div className="explorer-tree" hidden={compact && readerOpen}>
         <div className="explorer-tree-header">
           <span className="explorer-tree-title">Library</span>
+          <LibraryImportButton />
           <button
             type="button"
             className="opener-btn"
             title="Refresh"
-            onClick={() => product.library.list().then((d) => useLibrary.setState({ docs: d }))}
+            onClick={() => { void useLibrary.getState().refresh(); }}
           >
             <RefreshCw size={13} />
           </button>
@@ -414,7 +420,7 @@ export function LibraryPanel({ deepLink = null }: { deepLink?: LibraryDeepLink |
           <Search size={14} />
           <input
             type="text"
-            placeholder="Search title, path, tags…"
+            placeholder="Search documents…"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
           />
@@ -430,12 +436,14 @@ export function LibraryPanel({ deepLink = null }: { deepLink?: LibraryDeepLink |
           )}
         </div>
 
+        {searchWarning && <div className="tree-loading" role="status">{searchWarning}</div>}
+        <LibraryAvailability />
         <div className="explorer-tree-body library-tree">
           {loading ? (
             <DelayedStencilList label="Loading library" className="tree-loading" />
           ) : tree.length === 0 ? (
             <div className="tree-pane-empty">
-              {docs.length === 0 ? 'No documents yet' : 'No matches'}
+              {docs.length === 0 ? 'No documents yet' : bodySearching ? 'Searching…' : 'No matches'}
             </div>
           ) : (
             tree.map((bucketRoot) => (
@@ -554,6 +562,7 @@ export function LibraryPanel({ deepLink = null }: { deepLink?: LibraryDeepLink |
               </div>
             )}
 
+            <LibraryAvailability scope={selectedDoc.scope ?? 'global'} projectId={selectedDoc.projectId} />
             <DocPreview
               key={selectedDoc.id || selectedDoc.relPath}
               doc={selectedDoc}

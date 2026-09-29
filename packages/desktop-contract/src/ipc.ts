@@ -1,4 +1,5 @@
 export const IPC = {
+  sharedClient: { list: 'sharedClient:list', signIn: 'sharedClient:signIn', select: 'sharedClient:select', local: 'sharedClient:local', signOut: 'sharedClient:signOut' },
   startup: {
     state: 'startup:state',
     retry: 'startup:retry',
@@ -55,6 +56,12 @@ export const IPC = {
     pairingOnExit: 'hosts:pairingOnExit'
   },
   mobile: {
+    enroll: 'mobile:enroll',
+    pollEnrollment: 'mobile:pollEnrollment',
+    cancelEnrollment: 'mobile:cancelEnrollment',
+    disconnectAccount: 'mobile:disconnectAccount',
+    browserAddress: 'mobile:browserAddress',
+    redeemComputerCode: 'mobile:redeemComputerCode',
     configure: 'mobile:configure',
     status: 'mobile:status',
     pair: 'mobile:pair',
@@ -343,6 +350,10 @@ export const IPC = {
   },
   library: {
     list: 'library:list',
+    snapshot: 'library:snapshot',
+    readAsset: 'library:readAsset',
+    importFile: 'library:importFile',
+    onSnapshotChanged: 'library:onSnapshotChanged',
     add: 'library:add',
     update: 'library:update',
     remove: 'library:remove',
@@ -513,6 +524,7 @@ export const IPC = {
     list: 'commands:list'
   },
   app: {
+    performance: 'app:performance',
     homedir: 'app:homedir',
     version: 'app:version',
     microVmSupported: 'app:microVmSupported',
@@ -646,6 +658,7 @@ export const IPC = {
     delete: 'scheduler:delete',
     setEnabled: 'scheduler:setEnabled',
     runNow: 'scheduler:runNow',
+    reconcile: 'scheduler:reconcile',
     onChanged: 'scheduler:onChanged',
     listTemplates: 'scheduler:listTemplates',
     onTemplatesChanged: 'scheduler:onTemplatesChanged',
@@ -664,6 +677,7 @@ export const IPC = {
     delete: 'goals:delete',
     setStatus: 'goals:setStatus',
     runNow: 'goals:runNow',
+    reconcile: 'goals:reconcile',
     onChanged: 'goals:onChanged'
   },
   followups: {

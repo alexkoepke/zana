@@ -155,7 +155,7 @@ export function ThreadCommandComposer({
   const threads = useThreads((s) => s.threads);
   const currentThread = threadId ? threads.find((row) => row.id === threadId) : undefined;
   const [hostId, setHostId] = useState(() => defaultHostId(hosts, pinnedProject));
-  const catalogHostId = currentThread?.hostId ?? selectedProject?.hostId ?? hostId;
+  const catalogHostId = currentThread?.hostId ?? (selectedProject?.remote ? selectedProject.hostId : hostId ?? selectedProject?.hostId);
   const options = useThreadComposerOptions({
     threadId,
     lockedProviderId,
@@ -217,10 +217,22 @@ export function ThreadCommandComposer({
   const [hostBusy, setHostBusy] = useState<string | null>(null);
   const [pairingCommand, setPairingCommand] = useState<string | null>(null);
   const [sshPick, setSshPick] = useState<{ hostId: string; name: string } | null>(null);
+  const hostProjectRef = useRef(selectedProject?.id);
 
   useEffect(() => {
-    setHostId(defaultHostId(hosts, selectedProject));
+    if (hostProjectRef.current !== selectedProject?.id) {
+      hostProjectRef.current = selectedProject?.id;
+      setHostId(defaultHostId(hosts, selectedProject));
+    } else {
+      // Status refreshes must not silently move an unsent prompt to another host.
+      setHostId(current => current ?? defaultHostId(hosts, selectedProject));
+    }
   }, [hosts, selectedProject]);
+
+  useEffect(() => {
+    setWorkspace(current => current.kind === 'reuse' ? { kind: 'unmanaged' }
+      : current.kind === 'worktree' ? { kind: 'worktree' } : current);
+  }, [hostId, projectId]);
 
   const hostAction = useMemo(
     () => resolveComposerHostAction({
@@ -273,7 +285,7 @@ export function ThreadCommandComposer({
     ? options.providerId
     : options.providers.find((row) => row.id === 'fake')?.id
       ?? (options.providers.some((row) => row.id === options.providerId) ? options.providerId : options.providers[0]?.id);
-  const providerCliHostId = currentThread?.hostId ?? selectedProject?.hostId ?? hostId;
+  const providerCliHostId = currentThread?.hostId ?? (selectedProject?.remote ? selectedProject.hostId : hostId ?? selectedProject?.hostId);
   const providerCli = useComposerProviderCli({
     enabled: !threadId,
     hostId: providerCliHostId,
@@ -335,6 +347,7 @@ export function ThreadCommandComposer({
       ? 'Ask for a follow-up. @ to mention files, folders, or threads'
       : 'Ask anything. @ to mention files, folders, or threads',
     testId: 'thread-command-input',
+    hostId: catalogHostId,
     projectId,
     threadId,
     projectRoot: selectedProject?.path,
@@ -942,7 +955,7 @@ export function ThreadCommandComposer({
                 {!selectedProject?.remote && !foreignHost && (
                   <div className="composer-run-setting">
                     <span className="composer-run-setting-label">Working folder</span>
-                    <EnvironmentPicker projectId={projectId} value={workspace} onChange={setWorkspace} />
+                    <EnvironmentPicker hostId={hostId} projectId={projectId} value={workspace} onChange={setWorkspace} />
                   </div>
                 )}
                 {showHostPicker && pickerHosts.length > 0 && (

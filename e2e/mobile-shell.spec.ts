@@ -1,6 +1,5 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { execFile, execFileSync } from 'node:child_process';
-import { promisify } from 'node:util';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { chromium } from '@playwright/test';
@@ -15,7 +14,7 @@ test.use({ launchEnv: { ZCC_FAKE_PROVIDER: '1' } });
 test('Mobile pairs to built Electron, uses phone navigation, reads and sends a live thread', async ({
   app
 }, testInfo) => {
-  test.setTimeout(process.env.ZCC_MOBILE_MAESTRO ? 480_000 : 180_000);
+  test.setTimeout(180_000);
   const directory = join(app.home, 'mobile-project');
   mkdirSync(directory);
   const git = (...args: string[]) => execFileSync('git', args, { cwd: directory, encoding: 'utf8' });
@@ -74,10 +73,6 @@ test('Mobile pairs to built Electron, uses phone navigation, reads and sends a l
     port
   });
   const browser = await chromium.launch();
-  const androidAdb = process.env.ZCC_MOBILE_ADB;
-  const nativeDevice = process.env.ZCC_MOBILE_DEVICE;
-  let reversedAndroidPort = false;
-  const runNative = promisify(execFile);
   try {
     const context = await browser.newContext({
       viewport: { width: 390, height: 844 },
@@ -758,31 +753,6 @@ test('Mobile pairs to built Electron, uses phone navigation, reads and sends a l
       /Ask/
     );
     await phone.screenshot({ path: testInfo.outputPath('zana-mobile-composer.png') });
-    if (process.env.ZCC_MOBILE_MAESTRO) {
-      // Force native swipes through the renderer's inner scroll area. A short
-      // conversation fits on screen and cannot detect disabled WebView scrolling.
-      await composer.fill(
-        'Mobile scroll regression\n\n' +
-          Array.from(
-            { length: 12 },
-            (_, i) => `Scroll checkpoint ${i + 1}: keep this conversation readable on a phone.`
-          ).join('\n\n')
-      );
-      // The first follow-up also applies model/options to the isolated host.
-      // Await its HTTP acknowledgement explicitly before checking the reply.
-      const [sent] = await Promise.all([
-        phone.waitForResponse(
-          (response) => response.url().endsWith(`/api/v1/threads/${threadId}/send`)
-            && response.request().method() === 'POST',
-          { timeout: 60_000 }
-        ),
-        send.click()
-      ]);
-      expect(sent.ok()).toBe(true);
-      await expect(
-        phone.getByText('Response to: Mobile scroll regression', { exact: true })
-      ).toBeVisible();
-    }
     await composer.fill('Hello from the phone');
     await send.click();
     await expect(phone.getByText('Hello from the phone', { exact: true }).first()).toBeVisible();
@@ -799,54 +769,6 @@ test('Mobile pairs to built Electron, uses phone navigation, reads and sends a l
     await expect.poll(() => phone.evaluate((id) => (
       JSON.parse(localStorage.getItem(`zcc.secondaryPanel.${id}`) ?? 'null')?.tabs
     ), threadId)).toEqual([expect.objectContaining({ id: 'mobile-saved-tab' })]);
-    // Optional real iOS/Android shell acceptance against this same isolated
-    // production server. The default test remains independent of native SDKs.
-    if (process.env.ZCC_MOBILE_MAESTRO) {
-      // A per-test reverse keeps both platforms on the same loopback gateway.
-      // Never bind the production server to the LAN just to test Android.
-      if (androidAdb) {
-        if (!nativeDevice) throw new Error('ZCC_MOBILE_ADB requires ZCC_MOBILE_DEVICE.');
-        await runNative(
-          androidAdb,
-          ['-s', nativeDevice, 'reverse', '--no-rebind', `tcp:${port}`, `tcp:${port}`],
-          { timeout: 10_000 }
-        );
-        reversedAndroidPort = true;
-      }
-      const pairing = gateway.pair();
-      const pairLink = `zana://connect?payload=${encodeURIComponent(JSON.stringify(pairing))}`;
-      const threadLink = `zana://open?server=${encodeURIComponent(serverUrl)}&path=${encodeURIComponent(`/threads/${threadId}`)}`;
-      try {
-        const native = await runNative(
-          process.env.ZCC_MOBILE_MAESTRO,
-          [
-            ...(process.env.ZCC_MOBILE_DEVICE ? ['--device', process.env.ZCC_MOBILE_DEVICE] : []),
-            'test',
-            '--test-output-dir',
-            testInfo.outputPath('native'),
-            '-e',
-            `PAIR_LINK=${pairLink}`,
-            '-e',
-            `THREAD_LINK=${threadLink}`,
-            'apps/mobile/e2e/flows/paired-thread.yaml'
-          ],
-          { timeout: 420_000, maxBuffer: 2 * 1024 * 1024 }
-        );
-        writeFileSync(testInfo.outputPath('native-acceptance.log'), native.stdout + native.stderr);
-      } catch (error) {
-        const failure = error as Error & {
-          stdout?: string;
-          stderr?: string;
-          code?: unknown;
-          signal?: string;
-        };
-        writeFileSync(
-          testInfo.outputPath('native-acceptance.log'),
-          `${failure.message}\nExit: ${failure.code}, signal: ${failure.signal}\n${failure.stdout ?? ''}${failure.stderr ?? ''}`
-        );
-        throw error;
-      }
-    }
     await phone.setViewportSize({ width: 1280, height: 1180 });
     await expect(phone.locator('.app-shell')).toHaveAttribute('data-mobile', 'false');
     await expect(composerOptions).toBeHidden();
@@ -885,11 +807,6 @@ test('Mobile pairs to built Electron, uses phone navigation, reads and sends a l
       200
     );
   } finally {
-    if (reversedAndroidPort) {
-      await runNative(androidAdb!, ['-s', nativeDevice!, 'reverse', '--remove', `tcp:${port}`], {
-        timeout: 10_000
-      }).catch((error) => console.warn('Android test port cleanup failed:', error.message));
-    }
     await browser.contexts()[0]?.tracing.stop({ path: testInfo.outputPath('phone-trace.zip') });
     await browser.close();
     await gateway.close();

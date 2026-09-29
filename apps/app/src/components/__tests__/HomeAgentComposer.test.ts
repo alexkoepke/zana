@@ -184,7 +184,7 @@ describe('ThreadCommandComposer submit path', () => {
     const source = readFileSync(new URL('../ThreadCommandComposer.tsx', import.meta.url), 'utf8');
     expect(source).toContain('product.threads.create');
     expect(source).toContain('hostId: catalogHostId');
-    expect(source).toContain('const catalogHostId = currentThread?.hostId ?? selectedProject?.hostId ?? hostId');
+    expect(source).toContain('const catalogHostId = currentThread?.hostId ?? (selectedProject?.remote ? selectedProject.hostId : hostId ?? selectedProject?.hostId)');
     expect(source).toContain('hostPending: !catalogHostId && hosts.length === 0');
     expect(source).toContain('isForeignExecutionHost');
     expect(source).toContain("kind: 'personal'");

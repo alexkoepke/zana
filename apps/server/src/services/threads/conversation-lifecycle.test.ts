@@ -47,6 +47,12 @@ vi.mock('@zana-ai/zcc-db', () => {
   }]);
   return {
   DEFERRED_THREAD_MESSAGE_CAP: 50,
+  getLatestConversationCheckpoint: vi.fn(() => null),
+  listConversationActiveTurnInputs: vi.fn((_db, _id, before = Infinity) => {
+    const events = listConversationThreadEvents();
+    const sequence = Math.max(0, ...events.map(row => row.sequence));
+    return sequence > 0 && sequence < before ? [{ sequence, events }] : [];
+  }),
   getConversationThread: vi.fn(() => thread),
   applyConversationThreadLifecycleEvent: vi.fn((_db, args) => {
     const nextStatus = args.event.type === 'run.started' ? 'active'
@@ -128,6 +134,9 @@ vi.mock('@zana-ai/zcc-db', () => {
   hasPendingInteractionForThread: vi.fn(() => false),
   countLiveThreadsForEnvironment: vi.fn(() => 1),
   countConversationThreadEvents: vi.fn(() => listConversationThreadEvents().length),
+  conversationTimelineWindowStart: vi.fn(() => 1),
+  hasConversationEventsBefore: vi.fn(() => false),
+  conversationTimelineHeadEvents: vi.fn(() => []),
   listConversationThreadEventsWindow: vi.fn(() => listConversationThreadEvents()),
   nextConversationEventSequence: vi.fn(() => 1),
   maxConversationEventSequenceByThreadIds: vi.fn(() => ({})),
@@ -990,7 +999,7 @@ describe('conversation lifecycle', () => {
       rows: Array<{ type: string }>;
     };
     expect(copied.rows.map((row) => row.type)).toEqual(['turn/started', 'turn/completed']);
-    expect(listConversationThreadEvents).toHaveBeenCalledWith(expect.anything(), thread.id);
+    expect(listConversationThreadEvents).toHaveBeenCalledWith(expect.anything(), thread.id, { omitPayloadTypes: ['turn/diff/updated'] });
   });
 
   it('copies no events when the source thread is empty', async () => {

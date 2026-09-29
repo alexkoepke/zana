@@ -311,6 +311,7 @@ export function AgentSessionView({
     panelBody = (
       <ThreadFilePreviewTab
         threadId={session.id}
+        previewRevision={closable.previewRevision}
         path={closable.path}
         openerKey={closable.openerKey}
         projectId={projectId}

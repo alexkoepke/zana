@@ -102,6 +102,14 @@ test('Library opens full-width mobile documents and restores the tree on Back', 
     await navigate(page, '/plugins/docs/panel/global/notes/mobile-note-00.md');
     await expect(page.locator('.library-panel')).toHaveAttribute('data-mobile-pane', 'document');
     await expect(page.getByRole('heading', { name: 'A readable mobile document' })).toBeVisible();
+    await page.getByRole('button', { name: 'Back to documents' }).click();
+    await page.locator('.library-panel .library-search input').fill('comfortable text and scrolling');
+    // The phrase occurs only in document bodies, never in names or metadata.
+    const folder = page.locator('.library-panel .tree-row.dir').filter({ hasText: 'notes' });
+    await expect(folder).toBeVisible();
+    if (!(await page.getByRole('button', { name: 'mobile-note-00.md', exact: true }).isVisible())) await folder.click();
+    await page.getByRole('button', { name: 'mobile-note-00.md', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'A readable mobile document' })).toBeVisible();
   } finally {
     await browser.close();
     await gateway.close();

@@ -1,3 +1,13 @@
+import type { CliDiscoveryRequest, CliDiscoveryResult } from '@zana-ai/zcc-contracts/cli-discovery';
+import type { CliCallbackControl } from '@zana-ai/zcc-contracts/cli-callbacks';
+import type { ProjectFeedRequest, ProjectFeedResult } from '@zana-ai/zcc-contracts/project-feed';
+import type { LibraryAgentRequest } from '@zana-ai/zcc-contracts/library-agent';
+import type { ToolCallResponse } from '@zana-ai/zcc-domain/thread-runtime';
+import type { LibraryDocumentRequest } from '@zana-ai/zcc-contracts/library-documents';
+import { enrollHostUtility } from './enroll-host-utility.js';
+import { createProductEventForwarder } from './product-event-forwarder.js';
+import type { ProjectMetadataRequest, ProjectMetadataResult, ProjectCatalogRequest, ProjectCatalogResult } from '@zana-ai/zcc-contracts/project-metadata-records';
+import type { ProjectHistoryRequest, ProjectHistoryResult } from '@zana-ai/zcc-contracts/project-history';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { utilityProcess } from 'electron';
@@ -37,6 +47,8 @@ export type RuntimePluginContribution = Extract<
 export type RuntimePluginApp = Extract<RuntimeOutbound, { type: 'plugin-apps-changed' }>['apps'][number];
 
 export interface RuntimeSupervisor {
+  /** Product registry identity, unavailable until enrollment is acknowledged. */
+  readonly hostId: string | undefined;
   readonly rendererUrl: string;
   readonly hostUrl: string;
   readonly hostToken: string;
@@ -63,11 +75,20 @@ export interface RuntimeSupervisor {
   relaunchEnrolledHost(): Promise<{ ok: true } | { ok: false; message: string }>;
   appVersion(): Promise<string>;
   listProjects(): Promise<RuntimeProject[]>;
+  projectMetadata(request: ProjectMetadataRequest): Promise<ProjectMetadataResult>;
+  projectCatalogs(request: ProjectCatalogRequest): Promise<ProjectCatalogResult>;
+  projectFeed(request: ProjectFeedRequest): Promise<ProjectFeedResult>;
+  cliDiscovery(request: CliDiscoveryRequest): Promise<CliDiscoveryResult>;
+  cliCallbackGrant(request: CliCallbackControl): Promise<{ ok: true }>;
+  projectHistory(request: ProjectHistoryRequest): Promise<ProjectHistoryResult>;
+  libraryAgent(request: LibraryAgentRequest): Promise<ToolCallResponse>;
+  libraryDocument(request: LibraryDocumentRequest): Promise<unknown>;
   addProject(path: string): Promise<RuntimeProject>;
   updateProject(id: string, patch: RuntimeProjectPatch): Promise<RuntimeProject | null>;
   reorderProjects(orderedIds: string[]): Promise<RuntimeProject[]>;
   touchProject(id: string): Promise<RuntimeProject | null>;
   removeProject(id: string): Promise<RuntimeProject | null>;
+  publishProductEvent(channel: string, args: unknown[]): Promise<void>;
   getProjectSettings(id: string): Promise<RuntimeProjectSettings>;
   setProjectSettings(id: string, patch: RuntimeProjectSettings): Promise<RuntimeProjectSettings>;
   executeTerminal(command: TerminalRequestCommand): Promise<TerminalHostEvent[]>;
@@ -75,6 +96,8 @@ export interface RuntimeSupervisor {
   terminalEventsSince(sessionId: string, afterSequence?: number): Promise<TerminalHostEvent[]>;
   onTerminalEvent(listener: (event: TerminalHostEvent) => void): () => void;
   onProjectSettingsChanged(listener: (projectId: string) => void): () => void;
+  onLibraryChanged(listener: () => void): () => void;
+  onProjectsChanged(listener: () => void): () => void;
   onPluginCapabilitiesChanged(
     listener: (contributors: RuntimePluginContribution[]) => void
   ): () => void;
@@ -187,6 +210,7 @@ export async function startRuntimeSupervisor(options: StartRuntimeSupervisorOpti
   }
   return {
     rendererUrl: renderer.url,
+    hostId,
     hostUrl: host.url,
     hostToken: token,
     hostSigningKey: signingKey,
@@ -204,11 +228,20 @@ export async function startRuntimeSupervisor(options: StartRuntimeSupervisorOpti
     },
     appVersion: async () => options.version ?? '',
     listProjects: async () => [],
+    projectCatalogs: async () => { throw new Error('Project catalogues require the product runtime'); },
+    projectFeed: async () => { throw new Error('Activity feed runtime is unavailable'); },
+    cliDiscovery: async () => { throw new Error('CLI discovery requires the product runtime'); },
+    cliCallbackGrant: async () => { throw new Error('CLI callbacks require the product runtime'); },
+    projectHistory: async () => { throw new Error('Project history requires the product runtime'); },
+    projectMetadata: async () => { throw new Error('Project metadata requires the product runtime'); },
+    libraryAgent: async () => { throw new Error('Library requires the product runtime'); },
+    libraryDocument: async () => { throw new Error('Library requires the product runtime'); },
     addProject: async () => { throw new Error('runtime project storage is unavailable'); },
     updateProject: async () => { throw new Error('runtime project storage is unavailable'); },
     reorderProjects: async () => { throw new Error('runtime project storage is unavailable'); },
     touchProject: async () => { throw new Error('runtime project storage is unavailable'); },
     removeProject: async () => { throw new Error('runtime project storage is unavailable'); },
+    publishProductEvent: async () => { throw new Error('Shared product events require the product runtime'); },
     getProjectSettings: async () => { throw new Error('runtime project settings storage is unavailable'); },
     setProjectSettings: async () => { throw new Error('runtime project settings storage is unavailable'); },
     executeTerminal: (command) => terminalSessions!.execute(command),
@@ -219,6 +252,8 @@ export async function startRuntimeSupervisor(options: StartRuntimeSupervisorOpti
       return () => terminalListeners.delete(listener);
     },
     onProjectSettingsChanged: () => () => {},
+    onLibraryChanged: () => () => {},
+    onProjectsChanged: () => () => {},
     onPluginCapabilitiesChanged: () => () => {},
     listPluginApps: async () => [],
     onPluginAppsChanged: () => () => {},
@@ -261,6 +296,15 @@ interface UtilityRuntime {
   child: UtilityChild;
   url: string;
   request(operation: 'app-version' | 'projects-list'): Promise<unknown>;
+  request(operation: 'project-metadata', request: ProjectMetadataRequest): Promise<unknown>;
+  request(operation: 'project-catalogs', request: ProjectCatalogRequest): Promise<unknown>;
+  request(operation: 'project-feed', request: ProjectFeedRequest): Promise<unknown>;
+  request(operation: 'cli-discovery', request: CliDiscoveryRequest): Promise<unknown>;
+  request(operation: 'cli-callback-grant', request: CliCallbackControl): Promise<unknown>;
+  request(operation: 'project-history', request: ProjectHistoryRequest): Promise<unknown>;
+  request(operation: 'library-agent', request: LibraryAgentRequest): Promise<unknown>;
+  request(operation: 'library-document', request: LibraryDocumentRequest): Promise<unknown>;
+  request(operation: 'product-event', channel: string, args: unknown[]): Promise<unknown>;
   request(operation: 'thread-live', threadId: string, projectId: string): Promise<unknown>;
   request(operation: 'menubar-threads-list', limit: number): Promise<unknown>;
   request(operation: 'menubar-thread-open', threadId: string, projectId: string): Promise<unknown>;
@@ -357,48 +401,6 @@ function startUtility(
   });
 }
 
-function enrollHostUtility(
-  child: UtilityChild,
-  input: { serverUrl: string; token: string; dataDir: string },
-  type: 'enroll' | 'relaunch' = 'enroll'
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      child.off?.('message', onMessage);
-      if (error) reject(error);
-      else resolve();
-    };
-    const timer = setTimeout(
-      () => finish(new Error(type === 'relaunch' ? 'host relaunch timed out' : 'host enroll timed out')),
-      type === 'relaunch' ? 20_000 : 15_000
-    );
-    const onMessage = (message: unknown) => {
-      const data = message as { type?: string; message?: string };
-      if (data.type === 'enrolled') {
-        finish();
-        return;
-      }
-      if (data.type === 'error') {
-        finish(new Error(data.message ?? (type === 'relaunch' ? 'host relaunch failed' : 'host enroll failed')));
-      }
-    };
-    child.on('message', onMessage);
-    child.postMessage({
-      type,
-      protocolVersion: SERVER_RUNTIME_PROTOCOL_VERSION,
-      serverUrl: input.serverUrl,
-      token: input.token,
-      dataDir: input.dataDir,
-      path: process.env.PATH,
-      ghBinary: process.env.ZCC_GH_BINARY
-    });
-  });
-}
-
 async function startUtilityRuntime(options: StartRuntimeSupervisorOptions & { token: string; signingKey: string; hostId: string }): Promise<RuntimeSupervisor> {
   const runtimeDir = options.runtimeDir!;
   const host = await startUtility(join(runtimeDir, 'host-runtime.js'), {
@@ -451,7 +453,12 @@ async function startUtilityRuntime(options: StartRuntimeSupervisorOptions & { to
     token: readEnrollToken(options.dataDir!),
     dataDir: options.dataDir!
   };
-  const enrollOnce = () => failed || closing ? Promise.reject(new Error('Background service unavailable')) : enrollHostUtility(host.child, enrollInput);
+  let enrolledHostId: string | undefined;
+  const enrollOnce = async (type: 'enroll' | 'relaunch' = 'enroll') => {
+    if (failed || closing) throw new Error('Background service unavailable');
+    const identity = await enrollHostUtility(host.child, enrollInput, type);
+    if (!failed && !closing) enrolledHostId = identity;
+  };
   try {
     await enrollOnce();
   } catch (error) {
@@ -469,8 +476,11 @@ async function startUtilityRuntime(options: StartRuntimeSupervisorOptions & { to
       }).catch(() => undefined);
     }, 5_000);
   }
+  const productEvents = createProductEventForwarder((channel, args) => server.request('product-event', channel, args));
   const terminalListeners = new Set<(event: TerminalHostEvent) => void>();
   const projectSettingsListeners = new Set<(projectId: string) => void>();
+  const libraryListeners = new Set<() => void>();
+  const projectsListeners = new Set<() => void>();
   const pluginCapabilitiesListeners = new Set<(contributors: RuntimePluginContribution[]) => void>();
   const pluginAppsListeners = new Set<(apps: RuntimePluginApp[]) => void>();
   const menubarThreadListeners = new Set<() => void>();
@@ -492,6 +502,14 @@ async function startUtilityRuntime(options: StartRuntimeSupervisorOptions & { to
   renderer.child.on('message', (message: unknown) => {
     const parsed = RuntimeOutboundSchema.safeParse(message);
     if (!parsed.success) return;
+    if (parsed.data.type === 'projects-changed') {
+      for (const listener of projectsListeners) listener();
+      return;
+    }
+    if (parsed.data.type === 'library-changed') {
+      for (const listener of libraryListeners) listener();
+      return;
+    }
     if (parsed.data.type === 'project-settings-changed') {
       for (const listener of projectSettingsListeners) listener(parsed.data.projectId);
       return;
@@ -511,6 +529,7 @@ async function startUtilityRuntime(options: StartRuntimeSupervisorOptions & { to
   });
   return {
     rendererUrl: renderer.url,
+    get hostId() { return enrolledHostId; },
     hostUrl: host.url,
     hostToken: options.token,
     hostSigningKey: options.signingKey,
@@ -552,10 +571,19 @@ async function startUtilityRuntime(options: StartRuntimeSupervisorOptions & { to
       return Array.isArray(value) ? value as RuntimeProject[] : [];
     },
     addProject: (path) => server.request('projects-add', path) as Promise<RuntimeProject>,
+    projectCatalogs: (request) => server.request('project-catalogs', request) as Promise<ProjectCatalogResult>,
+    projectFeed: (request) => server.request('project-feed', request) as Promise<ProjectFeedResult>,
+    cliDiscovery: (request) => server.request('cli-discovery', request) as Promise<CliDiscoveryResult>,
+    cliCallbackGrant: (request) => server.request('cli-callback-grant', request) as Promise<{ ok: true }>,
+    projectHistory: (request) => server.request('project-history', request) as Promise<ProjectHistoryResult>,
+    projectMetadata: (request) => server.request('project-metadata', request) as Promise<ProjectMetadataResult>,
+    libraryAgent: request => server.request('library-agent', request) as Promise<ToolCallResponse>,
+    libraryDocument: request => server.request('library-document', request),
     updateProject: (id, patch) => server.request('projects-update', id, patch) as Promise<RuntimeProject | null>,
     reorderProjects: (orderedIds) => server.request('projects-reorder', orderedIds) as Promise<RuntimeProject[]>,
     touchProject: (id) => server.request('projects-touch', id) as Promise<RuntimeProject | null>,
     removeProject: (id) => server.request('projects-remove', id) as Promise<RuntimeProject | null>,
+    publishProductEvent: async (channel, args) => { productEvents.publish(channel, args); },
     getProjectSettings: async (id) => {
       const value = await server.request('project-settings-get', id);
       return value && typeof value === 'object' ? value as RuntimeProjectSettings : {};
@@ -580,6 +608,14 @@ async function startUtilityRuntime(options: StartRuntimeSupervisorOptions & { to
     onProjectSettingsChanged(listener) {
       projectSettingsListeners.add(listener);
       return () => projectSettingsListeners.delete(listener);
+    },
+    onLibraryChanged(listener) {
+      libraryListeners.add(listener);
+      return () => libraryListeners.delete(listener);
+    },
+    onProjectsChanged(listener) {
+      projectsListeners.add(listener);
+      return () => projectsListeners.delete(listener);
     },
     onPluginCapabilitiesChanged(listener) {
       pluginCapabilitiesListeners.add(listener);
@@ -622,7 +658,7 @@ async function startUtilityRuntime(options: StartRuntimeSupervisorOptions & { to
         enrollRetry = null;
       }
       try {
-        await enrollHostUtility(host.child, enrollInput, 'relaunch');
+        await enrollOnce('relaunch');
         return { ok: true as const };
       } catch (error) {
         if (!failed && !closing) enrollRetry = setInterval(() => {
@@ -641,6 +677,9 @@ async function startUtilityRuntime(options: StartRuntimeSupervisorOptions & { to
     },
     async close(): Promise<void> {
       closing = true;
+      productEvents.dispose();
+      libraryListeners.clear();
+      projectsListeners.clear();
       if (enrollRetry) {
         clearInterval(enrollRetry);
         enrollRetry = null;
@@ -685,8 +724,8 @@ export function createUtilityRuntime(runtime: { child: UtilityChild; url: string
   return {
     ...runtime,
     request(
-      operation: 'app-version' | 'thread-live' | 'menubar-threads-list' | 'menubar-thread-open' | 'projects-list' | 'projects-add' | 'projects-update' | 'projects-reorder' | 'projects-touch' | 'projects-remove' | 'project-settings-get' | 'project-settings-set' | 'terminal-execute' | 'terminal-record' | 'terminal-events-since' | 'plugins-snapshot' | 'plugins-install' | 'plugins-enable' | 'plugins-disable' | 'plugins-remove' | 'plugins-reload' | 'plugins-logs' | 'plugins-search' | 'plugins-outdated' | 'plugins-update' | 'plugins-call-rpc' | 'plugins-settings-get' | 'plugins-settings-set' | 'plugins-cli-contributions' | 'plugins-cli-run' | 'marketplace-list' | 'marketplace-add' | 'marketplace-refresh' | 'marketplace-remove',
-       ...args: [number] | [TerminalRequestCommand] | [TerminalHostEvent] | [string] | [string[]] | [string, number?] | [string, RuntimeProjectPatch] | [string, RuntimeProjectSettings] | [string, string, unknown?] | [string, Record<string, string | number | boolean | null>] | [string, string[]] | [string, string[], { projectId?: string; threadId?: string; cwd?: string }?] | []
+      operation: 'cli-callback-grant' | 'cli-discovery' | 'library-agent' | 'library-document' | 'project-metadata' | 'project-catalogs' | 'project-history' | 'project-feed' | 'product-event' | 'app-version' | 'thread-live' | 'menubar-threads-list' | 'menubar-thread-open' | 'projects-list' | 'projects-add' | 'projects-update' | 'projects-reorder' | 'projects-touch' | 'projects-remove' | 'project-settings-get' | 'project-settings-set' | 'terminal-execute' | 'terminal-record' | 'terminal-events-since' | 'plugins-snapshot' | 'plugins-install' | 'plugins-enable' | 'plugins-disable' | 'plugins-remove' | 'plugins-reload' | 'plugins-logs' | 'plugins-search' | 'plugins-outdated' | 'plugins-update' | 'plugins-call-rpc' | 'plugins-settings-get' | 'plugins-settings-set' | 'plugins-cli-contributions' | 'plugins-cli-run' | 'marketplace-list' | 'marketplace-add' | 'marketplace-refresh' | 'marketplace-remove',
+       ...args: [number] | [CliCallbackControl] | [CliDiscoveryRequest] | [LibraryAgentRequest] | [LibraryDocumentRequest] | [ProjectMetadataRequest] | [ProjectCatalogRequest] | [string, unknown[]] | [TerminalRequestCommand] | [TerminalHostEvent] | [string] | [string[]] | [string, number?] | [string, RuntimeProjectPatch] | [string, RuntimeProjectSettings] | [string, string, unknown?] | [string, Record<string, string | number | boolean | null>] | [string, string[]] | [string, string[], { projectId?: string; threadId?: string; cwd?: string }?] | []
     ) {
       if (stopped || stopping) return Promise.reject(new Error('Background service stopped. Restart Zana to reconnect.'));
       const id = randomUUID();
@@ -698,10 +737,19 @@ export function createUtilityRuntime(runtime: { child: UtilityChild; url: string
         pending.set(id, { resolve: resolveResult, reject: rejectResult, timer });
         try { runtime.child.postMessage({
           type: 'request', protocolVersion: SERVER_RUNTIME_PROTOCOL_VERSION, id, operation, deadlineAt: new Date(Date.now() + 20_000).toISOString(),
+          ...(operation === 'project-catalogs' ? { request: args[0] as ProjectCatalogRequest } : {}),
+          ...(operation === 'project-feed' ? { request: args[0] as ProjectFeedRequest } : {}),
+          ...(operation === 'cli-discovery' ? { request: args[0] as CliDiscoveryRequest } : {}),
+          ...(operation === 'cli-callback-grant' ? { request: args[0] as CliCallbackControl } : {}),
+          ...(operation === 'project-history' ? { request: args[0] as ProjectHistoryRequest } : {}),
+          ...(operation === 'project-metadata' ? { request: args[0] as ProjectMetadataRequest } : {}),
+          ...(operation === 'library-agent' ? { request: args[0] as LibraryAgentRequest } : {}),
+          ...(operation === 'library-document' ? { request: args[0] as LibraryDocumentRequest } : {}),
           ...(operation === 'thread-live' ? { threadId: args[0] as string, projectId: args[1] as string } : {}),
           ...(operation === 'menubar-threads-list' ? { limit: args[0] as number } : {}),
           ...(operation === 'menubar-thread-open' ? { threadId: args[0] as string, projectId: args[1] as string } : {}),
           ...(operation === 'terminal-execute' ? { command: args[0] as TerminalRequestCommand } : {}),
+          ...(operation === 'product-event' ? { channel: args[0] as string, args: args[1] as unknown[] } : {}),
           ...(operation === 'terminal-record' ? { event: args[0] as TerminalHostEvent } : {}),
           ...(operation === 'terminal-events-since' ? {
             sessionId: args[0] as string,

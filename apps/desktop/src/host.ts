@@ -1,3 +1,12 @@
+import { createHostCliDiscovery } from './runtime/cli-discovery.js';
+import { ProjectCatalogs } from './runtime/project-catalogs.js';
+import { runtimeLibraryAgentApi } from './runtime/library-agent-api.js';
+import { createSnapshotNotifications } from './runtime/snapshot-notifications.js';
+import { localMetadataProjects, localProjectPathOptions } from '@zana-ai/zcc-server/services/projects/project-metadata';
+import { invokeSharedProduct } from './ipc/shared-product-registry.js';
+import { cliHostProblem, teamHostProblem } from './ipc/cli-host-guard.js';
+import { SHARED_PRODUCT_EVENTS } from '@zana-ai/zcc-contracts/shared-product';
+import { SharedClient, allowsSharedNavigation } from './window/shared-client.js';
 import { createHistoryProviders, invalidateHarnessModelCatalog } from '@zana-ai/zcc-host-daemon/harness/registry';
 import { RendererReadiness } from './window/renderer-readiness.js';
 import { runStartupDependencyDoctor } from './startup-dependency-doctor.js';
@@ -151,7 +160,6 @@ import {
   listWorktrees,
   listBranches,
   gitCommonDir,
-  getRecentCommits,
   removeWorktree,
   withWorktreeLock,
   worktreeState,
@@ -185,6 +193,7 @@ import {
 } from '@zana-ai/zcc-server';
 import { createAgentMessageLog, type IAgentMessageLog } from '@zana-ai/zcc-server/services/agents/agent-message-log';
 import { killLocalTmuxSession, listLocalTmuxSessionIds, reapOrphanTmuxSessions, verifyTmux } from '@zana-ai/zcc-host-daemon/tmux';
+import { workerRecoveryEvidence, type InspectWorkerLaunch } from '@zana-ai/zcc-server/services/launch/worker-recovery';
 import { exportInboxPdf } from './native/inbox-pdf.js';
 import { createSavedStore, type ISavedStore } from '@zana-ai/zcc-server';
 import { ABOUT_CREDITS, REPORT_BUG_URL, isDurableCoordination, type SavedRecord, type SavedRecordInput } from '@zana-ai/zcc-domain/product';
@@ -241,6 +250,11 @@ import { augmentPath, ensureProcessPath } from '@zana-ai/zcc-host-daemon/env';
 import { SchedulerManager } from '@zana-ai/zcc-server/services/scheduler/scheduler';
 import { GoalManager } from '@zana-ai/zcc-server/services/goals/goal-manager';
 import { FollowUpManager } from '@zana-ai/zcc-server/services/followups/followup-manager';
+import { ProjectRecordStore } from '@zana-ai/zcc-server/services/projects/project-record-store';
+import { listAllSchedules, saveSchedule, deleteSchedule } from '@zana-ai/zcc-server/services/scheduler/scheduler-store';
+import { validateScheduleFile } from '@zana-ai/zcc-server/services/scheduler/schedule-validation';
+import { listAllGoals, saveGoal, deleteGoal, validateGoalFile } from '@zana-ai/zcc-server/services/goals/goal-store';
+import { listAllFollowUps, saveFollowUp, deleteFollowUp, validateFollowUpFile } from '@zana-ai/zcc-server/services/followups/followup-store';
 import { readClaudeLoops } from '@zana-ai/zcc-server/services/misc/claude-loops-store';
 import { TrayController } from './tray.js';
 import { MenubarController, isRepliable } from './menu.js';
@@ -274,7 +288,7 @@ import { InboxSummaryService } from '@zana-ai/zcc-server';
 import { UsageService } from '@zana-ai/zcc-server/services/agents/usage-service';
 import type { UsageSummary } from '@zana-ai/zcc-domain/telemetry-events';
 import { FeedNoiseClassifier } from '@zana-ai/zcc-server/services/feed/feed-noise-classifier';
-import { FeedStore } from '@zana-ai/zcc-server';
+import { ProjectFeedStore } from './runtime/project-feed-store.js';
 import { FeedService } from '@zana-ai/zcc-server/services/feed/feed-service';
 import { FeedSummaryService } from '@zana-ai/zcc-server/services/feed/feed-summary';
 import {
@@ -284,7 +298,7 @@ import {
 } from '@zana-ai/zcc-host-daemon/harness/claude/transcript-reader';
 import { TranscriptSource } from '@zana-ai/zcc-server/services/misc/transcript-source';
 import type { HarnessAuthKey, HarnessAuthStatusInfo } from '@zana-ai/zcc-domain/product';
-import { getHarnessAuthStatus, setHarnessAuth } from '@zana-ai/zcc-host-daemon/harness-auth';
+import { getHarnessAuth, getHarnessAuthStatus, setHarnessAuth } from '@zana-ai/zcc-host-daemon/harness-auth';
 import { microVmPlatformSupported } from '@zana-ai/zcc-host-daemon/harness/microvm-environment';
 import { installedHarnessVersion, memoizeInstalledVersion } from '@zana-ai/zcc-host-daemon/harness/harness-verify';
 import { verifyEditors } from '@zana-ai/zcc-server/services/projects/editor-verify';
@@ -504,11 +518,7 @@ function resolveTheme(): 'dark' | 'light' {
 
 /** Resolve `projectPath` (passed by the renderer) to listSkills options. */
 function projectPathToOptions(projectPath?: string) {
-  if (!projectPath) return {};
-  const project = store.listProjects().find((p) => p.path === projectPath);
-  // Renderer paths are advisory. Never let an unregistered path select an
-  // arbitrary directory for skill discovery.
-  return project ? { projectPath: project.path, projectId: project.id } : {};
+  return localProjectPathOptions(store.listProjects(), runtimeSupervisor?.hostId, projectPath);
 }
 
 function emitSkillsChangedDebounced() {
@@ -621,7 +631,7 @@ async function runDiskSyncOnce(): Promise<void> {
 
 async function emitMcpChanged() {
   try {
-    const entries = await listMcpServersAll(store.listProjects());
+    const entries = await listMcpServersAll(localMetadataStore.listProjects());
     safeSend(IPC.mcp.onChanged, entries);
   } catch (err) {
     logMainError('emit mcp changed', err);
@@ -782,6 +792,8 @@ function setActiveProjectSkillsWatcher(
   projectPath: string | null,
   projectId: string | null
 ) {
+  const local = localMetadataStore.listProjects().some(project => project.id === projectId && project.path === projectPath);
+  if (!local) { stopActiveProjectSkillsWatcher(); return; }
   // Key on the project path/id (not the individual dirs) so switching to the
   // same project is a no-op even though we now arm multiple watchers.
   if (projectPath === activeProjectSkillsPath && projectId === activeProjectSkillsId) return;
@@ -845,7 +857,7 @@ function anyWindow(): BrowserWindow | null {
   }
   return null;
 }
-const ptys = new PtyManager();
+const ptys = new PtyManager({ resolveHarnessAuth: getHarnessAuth });
 const desktopBrowserViewManager = createDesktopBrowserViewManager({
   appCommands: {
     dispatchAppCommand({ command, hostWebContentsId }) {
@@ -1117,7 +1129,7 @@ function isWithinTrustedWorkspace(realPath: string): boolean {
 // App-managed checkout roots (`~/zcc-worktrees`, `~/.zcc/worktrees`,
 // `~/.zcc/personal-workspaces`) are included as trust anchors so an isolated
 // or New-worktree launch (cwd under those roots) passes the spawn gate.
-ptys.setProjectRoots(() => [...store.listProjects().map((p) => p.path), ...workspaceTrustRoots()]);
+ptys.setProjectRoots(() => [...localMetadataStore.listProjects().map((p) => p.path), ...workspaceTrustRoots()]);
 // WARP-C5: resolve the operator's layered RULES.md (~/.zcc/RULES.md +
 // <project>/.zcc/RULES.md) for each launch. Maps the projectId to the registered
 // project's path HERE (main authorizes — Rule 1), where the store is available;
@@ -1126,7 +1138,7 @@ ptys.setProjectRoots(() => [...store.listProjects().map((p) => p.path), ...works
 // A lazy closure so edits to a RULES.md take effect on the next launch with no
 // restart, and so it always reflects the current project set.
 ptys.setRulesResolver((projectId) => {
-  const path = store.listProjects().find((p) => p.id === projectId)?.path;
+  const path = localMetadataStore.listProjects().find((p) => p.id === projectId)?.path;
   return resolveRulesGuidance(path);
 });
 const agentStatus = new AgentStatusTracker();
@@ -1227,7 +1239,8 @@ const EXECUTION_CLAIM_RECONCILE_INTERVAL_MS =
   e2eTimingOverrideMs('ZCC_EXECUTION_RECONCILE_INTERVAL_MS') ?? 30_000;
 let executionClaimReconcileTimer: NodeJS.Timeout | null = null;
 const savedStore: ISavedStore = createSavedStore();
-const libraryStore: ILibraryStore = new LibraryStore(() => store.listProjects());
+const localMetadataStore = { ...store, listProjects: () => localMetadataProjects(store.listProjects(), runtimeSupervisor?.hostId) };
+const libraryStore: ILibraryStore = new LibraryStore(() => localMetadataStore.listProjects());
 const scheduler = new SchedulerManager();
 // Persistent project goals: an event-driven loop that spawns a worker, evaluates
 // it, and re-spawns with feedback until the success criteria pass (or it caps
@@ -1260,7 +1273,7 @@ let doctor: Doctor | null = null;
  * nothing new to show (first-ever launch, or already up to date).
  */
 let pendingWhatsNew: WhatsNewEvent | null = null;
-const templates = new TemplateStore(() => store.listProjects());
+const templates = new TemplateStore(() => localMetadataStore.listProjects(), () => projectCatalogs.sources('templates'), () => store.listProjects().map(project => project.id));
 const quickPrompts = new QuickPromptStore();
 // LLM micro-call layer: an editable prompt registry + a provider-agnostic
 // dispatcher. v1 registers only the claude-cli provider (a headless
@@ -2009,14 +2022,14 @@ const autoCloseIdle = new AutoCloseIdleService({
   // Best-effort, zero-token: re-run the idle→follow-up bridge from the cached
   // verdict so a parked question survives the close. createFromIdle dedups on
   // (session, open question), so calling it again is idempotent.
-  preserveParkedQuestion: (sessionId) => {
+  preserveParkedQuestion: async (sessionId) => {
     const verdict = lastTriageBySession.get(sessionId);
     if (!verdict || verdict.resolution !== 'awaiting-reply') return false;
     try {
-      return followups.createFromIdle(verdict) != null;
+      return (await followups.createFromIdle(verdict)) != null;
     } catch (err) {
       logMainError('autoCloseIdle preserveParkedQuestion', err);
-      return false;
+      throw err;
     }
   },
   pushInbox: (input) => {
@@ -2160,9 +2173,9 @@ const closeSummary = new CloseSummaryService({
   // Origin/session are host-stamped here (Rule 1) — the follow-up is attributed
   // to the agent being closed, not agent free-text. `note` kind: it's an
   // informational reminder about work left, not a live question awaiting reply.
-  createFollowUp: ({ projectId, sessionId, title, detail }) => {
+  createFollowUp: async ({ projectId, sessionId, title, detail }) => {
     try {
-      const f = followups.create({
+      const f = await followups.create({
         projectId,
         title,
         detail,
@@ -2308,10 +2321,14 @@ const reviewerApproval = new ReviewerApprovalService({
  *  project lifecycle) that has no other durable home. All other feed events are
  *  DERIVED live by {@link FeedService} from the inbox / followups / goals /
  *  library stores, so nothing is duplicated. Emits `'changed'` per projectId. */
-const feedStore = new FeedStore((projectId) =>
-  store.listProjects().find((p) => p.id === projectId)
-);
-feedStore.setLogger(logMainError);
+const feedStore = new ProjectFeedStore({
+  projects: () => store.listProjects(), primaryHostId: () => runtimeSupervisor?.hostId,
+  request: request => {
+    if (!runtimeSupervisor) throw new Error('Activity feed runtime is unavailable');
+    return runtimeSupervisor.projectFeed(request);
+  },
+  log: logMainError
+});
 /** Assembles a project's feed on demand: persisted slice + derived milestones +
  *  on-demand `git log` snapshot → merged, sorted newest-first, paginated. Reads
  *  main's own stores (Rule 1); never throws. */
@@ -2323,11 +2340,17 @@ const feedService = new FeedService({
   },
   listFollowups: () => followups.list(),
   listGoals: () => goals.list(),
-  listLibrary: () => libraryStore.list(),
-  getRecentCommits: (cwd, limit) => getRecentCommits(cwd, limit),
+  listLibrary: async () => {
+    if (!runtimeSupervisor) throw new Error('Library runtime is unavailable');
+    return runtimeSupervisor.libraryDocument({ action: 'list' }) as Promise<import('@zana-ai/zcc-domain/product').LibraryDoc[]>;
+  },
+  getRecentCommits: (projectId, limit) => {
+    if (!runtimeSupervisor) throw new Error('Project history runtime is unavailable');
+    return runtimeSupervisor.projectHistory({ projectId, limit });
+  },
   resolveProject: (projectId) => {
     const p = store.listProjects().find((proj) => proj.id === projectId);
-    return p ? { path: p.path, name: p.name } : undefined;
+    return p ? { name: p.name } : undefined;
   },
   logger: logMainError
 });
@@ -2363,7 +2386,7 @@ function stampFeedEvent(
   detail?: string
 ) {
   try {
-    feedStore.append({ projectId, kind, ts: Date.now(), title, detail, dedupeKey });
+    void feedStore.append({ projectId, kind, ts: Date.now(), title, detail, dedupeKey }).catch(error => logMainError('stampFeedEvent', error));
   } catch (err) {
     logMainError('stampFeedEvent', err);
   }
@@ -2381,8 +2404,8 @@ const diskSpecsById = new Map<string, DiskExtensionSpec>();
 // the persona/team stores read from it and re-emit `changed` on (de)registration.
 const personaTeamRegistry = new PersonaTeamRegistry(() => extensionEntries);
 const sshHostProviderRegistry = new SshHostProviderRegistry();
-const personas = new PersonaStore(() => store.listProjects(), personaTeamRegistry);
-const teams = new TeamStore(() => store.listProjects(), personaTeamRegistry);
+const personas = new PersonaStore(() => localMetadataStore.listProjects(), personaTeamRegistry, () => projectCatalogs.sources('personas'), () => store.listProjects().map(project => project.id));
+const teams = new TeamStore(() => localMetadataStore.listProjects(), personaTeamRegistry, () => projectCatalogs.sources('teams'), () => store.listProjects().map(project => project.id));
 
 // --- microVM playground pool (Rule 3/7) ------------------------------------
 // A host-managed pool of persistent, isolated microVM guests a NATIVE agent
@@ -2808,15 +2831,48 @@ let controlPlane: ControlPlaneHandle | null = null;
 // reactor, closed on quit. File-backed device store shares the `mobile:serve`
 // CLI's path convention so devices paired either way are visible to both.
 const mobileGateway = new MobileGatewayManager({
+  dataDir: electronZccDataDir(),
   // Private E2E launches must not compete with the installed app's phone port.
   ...(E2E_LAUNCH && /^\d+$/.test(process.env.ZCC_E2E_MOBILE_PORT ?? '') &&
     Number(process.env.ZCC_E2E_MOBILE_PORT) > 0 && Number(process.env.ZCC_E2E_MOBILE_PORT) <= 65535
     ? { port: Number(process.env.ZCC_E2E_MOBILE_PORT) } : {}),
   connectionStore: new MobileConnectionStore(join(electronZccDataDir(), 'mobile', 'connection.json')),
   devices: new MobileDeviceStore(join(electronZccDataDir(), 'mobile', 'devices.json')),
-  upstream: productServerUrl()
+  // Resolve after the runtime has selected its actual port (including fallback ports).
+  upstream: productServerUrl
 });
 let runtimeSupervisor: RuntimeSupervisor | null = null;
+const libraryNotifications = createSnapshotNotifications(async () => {
+  if (!runtimeSupervisor) throw new Error('Library runtime is unavailable');
+  return runtimeSupervisor.libraryDocument({ action: 'snapshot' }) as Promise<import('@zana-ai/zcc-domain/product').LibrarySnapshot>;
+}, snapshot => {
+  safeSend(IPC.library.onSnapshotChanged, snapshot);
+  if (snapshot.complete) safeSend(IPC.library.onChanged, snapshot.docs);
+});
+const projectCatalogs = new ProjectCatalogs({
+  projects: () => store.listProjects(), primaryHostId: () => runtimeSupervisor?.hostId,
+  read: request => {
+    if (!runtimeSupervisor) throw new Error('Project catalogue runtime is unavailable');
+    return runtimeSupervisor.projectCatalogs(request);
+  },
+  changed: () => { templates.refresh(); personas.refresh(); teams.refresh(); },
+  log: (id, error) => logMainError(`project catalogue ${id}`, error)
+});
+let metadataProjectSignature = '';
+const projectsNotifications = createSnapshotNotifications(async () => {
+  if (!runtimeSupervisor) throw new Error('Project runtime is unavailable');
+  return runtimeSupervisor.listProjects();
+}, projects => {
+  const signature = JSON.stringify((projects as Project[]).map(project => [project.id, project.name, project.path, project.hostId]).sort());
+  if (signature !== metadataProjectSignature) {
+    templates.rebindProjects(); personas.rebindProjects(); teams.rebindProjects();
+    libraryStore.rebindProjects?.(); scheduler.rebindWatchers(); goals.rebindWatchers(); followups.rebindWatchers();
+    setActiveProjectSkillsWatcher(activeProjectSkillsPath, activeProjectSkillsId);
+    void projectCatalogs.refresh();
+    metadataProjectSignature = signature;
+  }
+  safeSend(IPC.projects.onChanged, projects);
+});
 /** Boot-injected, env-only. Never written to disk, never assigned onto process.env (PTY children inherit that). */
 let productServerCredential = '';
 
@@ -2953,6 +3009,11 @@ async function ensureRendererStaticHost(): Promise<void> {
   runtimeSupervisor.onProjectSettingsChanged((projectId) => {
     safeSend(IPC.projectSettings.onChanged, projectId);
   });
+  runtimeSupervisor.onLibraryChanged(() => { void libraryNotifications.invalidate(); });
+  runtimeSupervisor.onProjectsChanged(() => {
+    void projectsNotifications.invalidate();
+    void libraryNotifications.invalidate();
+  });
   runtimeSupervisor.onPluginCapabilitiesChanged((contributors) => {
     void applyPluginAgentCapabilities(contributors, logMainError).then(() => safeSend(IPC.skills.onChanged));
   });
@@ -3019,6 +3080,9 @@ function applyDockIcon() {
 }
 
 function safeSend(channel: string, ...args: unknown[]) {
+  if ([...SHARED_PRODUCT_EVENTS.values()].includes(channel)) {
+    void runtimeSupervisor?.publishProductEvent(channel, args).catch(error => logMainError('sharedProduct.event', error));
+  }
   // E2E tap: no-op export when ZCC_E2E is unset (one call into an empty fn — no
   // allocation, no push — so production timing is unaffected). See test-tap.ts.
   testTap.record(channel, args);
@@ -3079,6 +3143,7 @@ function claimDock() {
 }
 
 function showMainWindow() {
+  if (sharedClient.showSelected()) return;
   claimDock();
   const win = unscopedWindow();
   if (!win) {
@@ -3169,6 +3234,8 @@ function handleLoudInboxEntry(entry: InboxEntry) {
     logMainError('loudInboxNotification', err);
   }
 }
+
+const sharedClient = new SharedClient(() => showMainWindow(), () => { unscopedWindow()?.hide(); });
 
 function safeHandle<TArgs extends unknown[], TResult>(
   channel: string,
@@ -3393,6 +3460,8 @@ async function destroyProvisionedEnvironment(environmentId: string): Promise<voi
 export async function resolveWorktreeForRequest(
   req: CreateTerminalRequest
 ): Promise<Result<CreateTerminalRequest>> {
+  const hostProblem = cliHostProblem(req, store.listProjects().find(project => project.id === req.projectId), runtimeSupervisor?.hostId);
+  if (hostProblem) return { ok: false, code: 'HOST_UNSUPPORTED', message: hostProblem };
   // Strip any untrusted pre-set worktreeInfo / environment id — only THIS
   // function may set them.
   const { worktreeInfo: _ignored, workspaceEnvironmentId: _ignoredEnv, ...base } = req;
@@ -3680,6 +3749,8 @@ export function createTerminalConfined(
   const project = opts?.launchSnapshot?.project
     ?? store.listProjects().find((p) => p.id === req.projectId);
   if (!project) return { ok: false, code: 'NOT_FOUND', message: 'project not found' };
+  const hostProblem = cliHostProblem(req, project, runtimeSupervisor?.hostId);
+  if (hostProblem) return { ok: false, code: 'HOST_UNSUPPORTED', message: hostProblem };
   try {
     // Remote projects ignore req.cwd entirely — the cwd is on the remote host
     // and is set via the in-shell `cd` we inject into the ssh argv.
@@ -3969,7 +4040,17 @@ async function launchAuthorizedTerminal(
     persona: frameworkPersona
   });
   if (!selection.ok) return { ok: false, code: selection.code, message: selection.message };
-  const installedVersion = memoizeInstalledVersion(
+  // Registered project roots use the enrolled machine's discovery. Legacy SSH
+  // and main-owned scratch/worktrees retain their existing path until their
+  // environment records are owned by the product server.
+  const hostDiscovery = runtimeSupervisor && !project.remote && !effectiveLaunch.worktree && !effectiveLaunch.scratch
+    ? createHostCliDiscovery(request => runtimeSupervisor!.cliDiscovery(request), {
+        projectId: project.id, hostId: req.hostId ?? project.hostId ?? runtimeSupervisor.hostId,
+        cwd: effectiveLaunch.cwd, profile: selection.profile,
+        nativeAgentDiscoveryEnabled: config.nativeAgentDiscoveryEnabled === true
+      })
+    : undefined;
+  const installedVersion = hostDiscovery?.installedVersion ?? memoizeInstalledVersion(
     (adapterId) => installedHarnessVersion(config, adapterId)
   );
   const executionAuthorization = await preflightTerminalExecution({
@@ -3990,8 +4071,9 @@ async function launchAuthorizedTerminal(
   }, {
     consentStore: executionConsentStore,
     consentService: executionConsentService,
-    installedVersion
-  });
+    installedVersion,
+    discovery: hostDiscovery?.discovery
+  }).catch((error) => ({ decision: 'blocked' as const, reason: error instanceof Error ? error.message : 'CLI discovery failed' }));
   if (executionAuthorization.decision === 'blocked') {
     return { ok: false, code: 'DENIED', message: `Structured execution unavailable: ${executionAuthorization.reason}` };
   }
@@ -4225,20 +4307,33 @@ async function createInteractiveTerminal(req: CreateTerminalRequest): Promise<Re
   }
 }
 
+const inspectWorkerLaunch: InspectWorkerLaunch = async (projectId, sessionId, principal) => {
+  // The managers supply all identities from their own durable reservation.
+  // Missing or pruned evidence remains unknown; an absent process is not proof.
+  return workerRecoveryEvidence(await launchLedger.list(), store.listProjects().find(project => project.id === projectId), sessionId, principal);
+};
+
 /** Scheduler/Goal Manager path: options and principal are main-derived before authorization. */
 async function launchBackgroundTerminal(
   opts: TerminalLaunchOptions,
   principal: LaunchPrincipalRef
 ): Promise<TerminalSession> {
+  let spawnAttempted = false;
+  try {
   opts = applyUnattendedScheduledLaunch(opts);
   const projects = store.listProjects();
   const project = projects.find((candidate) => candidate.id === opts.projectId);
   if (!project) throw new LaunchSpawnError('NOT_FOUND', 'project not found');
+  const hostProblem = cliHostProblem({}, project, runtimeSupervisor?.hostId);
+  if (hostProblem) throw new LaunchSpawnError('HOST_UNSUPPORTED', hostProblem);
   const effectiveLaunch = resolveEffectiveLaunch(opts, project);
   const projectSettings = await getAuthoritativeProjectSettings(project.id);
   const executionScope = launchExecutionScope(project, opts, opts.config);
   const plan = preflightLaunch(opts, {
     principal: () => principal,
+    // Managers persist this main-owned identity before execution so an
+    // interrupted acknowledgement can be correlated with its worker.
+    sessionId: () => opts.preallocatedSessionId ?? randomUUID(),
     binding: () => ({
       consumerKind: opts.cohort ? 'team-slot' : 'terminal', personaId: opts.persona?.id,
       teamId: opts.cohort?.teamId, slotId: opts.cohort?.slotId,
@@ -4354,6 +4449,7 @@ async function launchBackgroundTerminal(
         spawnLaunch.cwd,
         authorizedPlan.resolved.config
       );
+      spawnAttempted = true;
       const session = createTerminalFromAuthorizedPlan({
         ...request,
         cwd: spawnLaunch.cwd,
@@ -4386,6 +4482,13 @@ async function launchBackgroundTerminal(
         createdAt: Date.now()
       });
       return session;
+  } catch (error) {
+    // Once process creation was attempted, a readiness/persistence error cannot
+    // establish that execution never started. Managers retain their reservation.
+    if (spawnAttempted) throw new LaunchSpawnError('LAUNCH_UNCONFIRMED', error instanceof Error ? error.message : String(error));
+    throw error;
+  }
+
 }
 
 function createTerminalFromAuthorizedPlan(opts: TerminalLaunchOptions): TerminalSession {
@@ -4594,6 +4697,8 @@ async function resolveTeamModelSnapshots(
   const project = store.listProjects().find((candidate) => candidate.id === projectId);
   const team = teams.list().find((candidate) => candidate.id === request.teamId);
   if (!project || !team) throw new Error('team or project not found');
+  const hostProblem = teamHostProblem(project, runtimeSupervisor?.hostId);
+  if (hostProblem) throw new Error(hostProblem);
   const slots = expandTeamSlots(team);
   if (slots.length !== request.slots.length) throw new Error('task count does not match host-expanded Team slots');
   const config = store.getConfig();
@@ -4651,6 +4756,8 @@ export function authorizeTeamLaunch(
   if (!team) return { ok: false, code: 'NOT_FOUND', message: `team not found: ${teamId}` };
   const project = store.listProjects().find((candidate) => candidate.id === projectId);
   if (!project) return { ok: false, code: 'NOT_FOUND', message: 'project not found' };
+  const hostProblem = teamHostProblem(project, runtimeSupervisor?.hostId);
+  if (hostProblem) return { ok: false, code: 'HOST_UNSUPPORTED', message: hostProblem };
   const autonomous = coordinationMode === 'autonomous-team'
     || (coordinationMode === 'freeform' && store.getConfig().teamLaunchEnabled === true);
   const personaSnapshot = personas.list();
@@ -4889,6 +4996,8 @@ export async function launchTeam(
   }
   const project = store.listProjects().find((p) => p.id === targetProjectId);
   if (!project) return { ok: false, code: 'NOT_FOUND', message: 'project not found' };
+  const hostProblem = teamHostProblem(project, runtimeSupervisor?.hostId);
+  if (hostProblem) return { ok: false, code: 'HOST_UNSUPPORTED', message: hostProblem };
   const currentConfig = store.getConfig();
 
   const personaSnapshot = personas.list();
@@ -5737,6 +5846,8 @@ export async function startTeamJobFromUi(
   if (!project) {
     return { ok: false, code: 'NOT_FOUND', message: 'project not found' };
   }
+  const hostProblem = teamHostProblem(project, runtimeSupervisor?.hostId);
+  if (hostProblem) return { ok: false, code: 'HOST_UNSUPPORTED', message: hostProblem };
   if (!team.orchestratorPersonaId) {
     return { ok: false, code: 'NO_ORCHESTRATOR', message: 'Team requires an orchestrator' };
   }
@@ -6481,11 +6592,7 @@ function wireBridgeListeners() {
     // Self-gates on `awaiting-reply` + the config flag + non-background session;
     // dedups per (session) so a steady idle agent yields one open follow-up.
     if (result.resolution === 'awaiting-reply') {
-      try {
-        followups.createFromIdle(result);
-      } catch (err) {
-        console.error('[followups] createFromIdle failed:', err);
-      }
+      void followups.createFromIdle(result).catch(err => logMainError('followups createFromIdle', err));
     }
   });
   catchUpSummary.on('summary', (result: CatchUpSummaryResult) => {
@@ -6559,6 +6666,11 @@ async function cloneAndRegisterProject(
 }
 
 function registerIpc() {
+  safeHandleFromWindow(IPC.sharedClient.list, () => sharedClient.instances(), err => { throw err; });
+  safeHandleFromWindow(IPC.sharedClient.signIn, () => sharedClient.signIn(), err => { throw err; });
+  safeHandleFromWindow(IPC.sharedClient.select, (_win, id: unknown) => sharedClient.select(id), err => { throw err; });
+  safeHandleFromWindow(IPC.sharedClient.local, () => sharedClient.local(), err => { throw err; });
+  safeHandleFromWindow(IPC.sharedClient.signOut, () => sharedClient.signOut(), err => { throw err; });
   registerDesktopBrowserIpc(desktopBrowserViewManager, {
     broker: desktopBrowserBroker,
     browserImport: browserImportService
@@ -6624,6 +6736,8 @@ function registerIpc() {
     get launchAutonomousTeam() { return launchAutonomousTeam; },
     get launchTeam() { return launchTeam; },
     get libraryStore() { return libraryStore; },
+    get localProjects() { return () => localMetadataStore.listProjects(); },
+    get invalidateLibrary() { return async () => { await runtimeSupervisor?.publishProductEvent('library:changed', []); }; },
     get llmService() { return llmService; },
     get logMainError() { return logMainError; },
     get mainWindow() { return mainWindow; },
@@ -6887,6 +7001,7 @@ function registerStartupStateIpc(): void {
   app.on('activate', () => {
     // Repair mode never reaches normal bootstrap, so window lifecycle belongs
     // beside startup IPC rather than normal services.
+    if (startupState.mode !== 'repair-required' && sharedClient.showSelected()) return;
     if (!unscopedWindow()) createWindow(undefined, startupState.mode === 'repair-required');
     else showMainWindow();
   });
@@ -6957,7 +7072,7 @@ async function bootstrapNormal() {
       await launchLedger.reconcileStartup({
         consumeConsent: (reservationId) => executionConsentStore.consume(reservationId),
         // Capability-owned tmux sessions get renderer restore's bounded grace window.
-        // Anything unclaimed is still removed by reapOrphanTmuxSessions below.
+        // This instance's unclaimed capabilities are reconciled after the grace window.
         reapSession: (sessionId) => restoreCapabilities.findSession(sessionId)
           ? Promise.resolve()
           : killLocalTmuxSession(sessionId)
@@ -7036,7 +7151,7 @@ async function bootstrapNormal() {
       const config = store.getConfig();
       const probeCwd = selectOpenCodeProbeCwd({
         lastProjectId: config.lastProjectId,
-        projects: store.listProjects(),
+        projects: localMetadataStore.listProjects(),
         pathExists: existsSync,
         ensureScratchRoot: () => store.ensureScratchRoot()
       });
@@ -7060,7 +7175,7 @@ async function bootstrapNormal() {
     if (!registration.discoverAgentDescriptors) continue;
     const profile = registration.defaultProfileId ?? registration.profiles[0]?.id;
     if (!profile) continue;
-    for (const project of store.listProjects()) {
+    for (const project of localMetadataStore.listProjects()) {
       if (project.remote) continue;
       void registration.discoverAgentDescriptors({
         profile,
@@ -7072,14 +7187,26 @@ async function bootstrapNormal() {
   }
   scheduler.setDeps({
     ptys,
+    inspectWorkerLaunch,
     launchTerminal: launchBackgroundTerminal,
     store,
+    persistence: new ProjectRecordStore({
+      kind: 'schedules', projects: () => store.listProjects(),
+      primaryHostId: () => runtimeSupervisor?.hostId,
+      request: request => {
+        if (!runtimeSupervisor) return Promise.reject(new Error('Project metadata requires the product runtime'));
+        return runtimeSupervisor.projectMetadata(request);
+      },
+      validate: validateScheduleFile,
+      local: { list: listAllSchedules, save: saveSchedule, remove: deleteSchedule },
+      log: (projectId, error) => logMainError(`schedule metadata ${projectId}`, error)
+    }),
     inbox: inboxStore,
     logger: logMainError,
     getPendingSubagentCount: (sessionId) => agentStatus.subagents(sessionId),
     resolvePersona: (id) => personas.list().find((p) => p.id === id)
   });
-  scheduler.loadAll(store.listProjects());
+  await scheduler.loadAll(store.listProjects());
   // Watch schedule dirs so a skill- or hand-authored schedule file goes live
   // without restart. Self-writes (run-history churn) are suppressed internally.
   scheduler.startWatching();
@@ -7088,8 +7215,20 @@ async function bootstrapNormal() {
   // transcript reader idle-triage uses. `active` goals auto-resume on boot.
   goals.setDeps({
     ptys,
+    inspectWorkerLaunch,
     launchTerminal: launchBackgroundTerminal,
     store,
+    persistence: new ProjectRecordStore({
+      kind: 'goals', projects: () => store.listProjects(),
+      primaryHostId: () => runtimeSupervisor?.hostId,
+      request: request => {
+        if (!runtimeSupervisor) return Promise.reject(new Error('Project metadata requires the product runtime'));
+        return runtimeSupervisor.projectMetadata(request);
+      },
+      validate: validateGoalFile,
+      local: { list: listAllGoals, save: saveGoal, remove: deleteGoal },
+      log: (projectId, error) => logMainError(`goals metadata ${projectId}`, error)
+    }),
     inbox: inboxStore,
     logger: logMainError,
     resolvePersona: (id) => personas.list().find((p) => p.id === id),
@@ -7117,13 +7256,24 @@ async function bootstrapNormal() {
       );
     }
   });
-  goals.loadAll(store.listProjects());
+  await goals.loadAll(store.listProjects());
   goals.startWatching();
   // Follow-ups: same lifetime + injection pattern, minus any loop. `getSession` /
   // `resolveProjectForSession` let the idle-triage bridge attribute a parked
   // question to the right project and skip background sessions.
   followups.setDeps({
     store,
+    persistence: new ProjectRecordStore({
+      kind: 'followups', projects: () => store.listProjects(),
+      primaryHostId: () => runtimeSupervisor?.hostId,
+      request: request => {
+        if (!runtimeSupervisor) return Promise.reject(new Error('Project metadata requires the product runtime'));
+        return runtimeSupervisor.projectMetadata(request);
+      },
+      validate: validateFollowUpFile,
+      local: { list: listAllFollowUps, save: saveFollowUp, remove: deleteFollowUp },
+      log: (projectId, error) => logMainError(`followups metadata ${projectId}`, error)
+    }),
     inbox: inboxStore,
     logger: logMainError,
     getSession: (sessionId) => {
@@ -7149,7 +7299,7 @@ async function bootstrapNormal() {
     followupsFromIdle: () =>
       store.getConfig().followupsFromIdle ?? store.getConfig().idleTriageEnabled === true
   });
-  followups.loadAll(store.listProjects());
+  await followups.loadAll(store.listProjects());
   followups.startWatching();
   // macOS menu-bar presence for the scheduler: live schedule list, a
   // running-count badge, and show/quit controls. Reads the same scheduler +
@@ -7209,7 +7359,7 @@ async function bootstrapNormal() {
       // waiting for the next PTY_REAP_INTERVAL_MS tick or schedule fire, so a
       // long sleep can't accumulate leaked ptmx fds.
       ptys.reapDeadSessions();
-      scheduler.loadAll(store.listProjects());
+      void scheduler.loadAll(store.listProjects()).catch(error => logMainError('scheduler wake', error));
       // Tell the renderer the machine woke, so it can re-attach remote tabs whose
       // local `ssh` proxy died during sleep. The renderer owns tab authority
       // (mirrors the restore design), so main only fires the signal — it decides
@@ -7224,6 +7374,7 @@ async function bootstrapNormal() {
   promptRegistry.start();
   personas.start();
   teams.start();
+  projectCatalogs.start();
   libraryStore.start?.();
   skillBundles.start();
   scheduleGroups.start();
@@ -7390,10 +7541,10 @@ async function bootstrapNormal() {
        // A lifecycle Stop is the authoritative end of an interactive turn. The
        // tracker keeps fallback behaviour for harnesses that never send one.
        agentStatus.turnFinished(sessionId);
-       scheduler.onAgentFinished(sessionId);
+       void scheduler.onAgentFinished(sessionId).catch(error => logMainError('scheduler Stop', error));
       // A goal worker finishing its turn is the trigger to evaluate + branch
       // (achieved / re-spawn / escalate). No-op for non-goal sessions.
-      void goals.onAgentFinished(sessionId);
+      void goals.onAgentFinished(sessionId).catch(error => logMainError('goal finish', error));
        // A blocked overlay wins over turn completion. The next UserPromptSubmit
        // callback begins a new turn and clears it; clearing here would turn an
        // unanswered permission/question into an incorrect idle state.
@@ -7593,9 +7744,9 @@ async function bootstrapNormal() {
     // A scheduled agent filed a run report via schedule_report. Attach it to
     // the matching run by sessionId (projectId is implied by the session).
     onReport: (_projectId: string, sessionId: string, summary: string, status) => {
-      scheduler.attachReport(sessionId, summary, status);
+      void scheduler.attachReport(sessionId, summary, status).catch(error => logMainError('scheduler report', error));
       // A goal worker's run report feeds its iteration's evaluator input.
-      goals.attachReport(sessionId, summary);
+      void goals.attachReport(sessionId, summary).catch(error => logMainError('goal report', error));
     },
     // Lets inbox_push stamp `scheduled` + `notify` (so the sidebar can group
     // and badge background-run entries) and drop `silent` pushes. Returns null
@@ -7635,7 +7786,7 @@ async function bootstrapNormal() {
       }
       const allowedBases = [homedir(), store.getConfig().cloneRoot?.trim() || '']
         .filter((b): b is string => !!b)
-        .concat(store.listProjects().map((p) => p.path));
+        .concat(localMetadataStore.listProjects().map((p) => p.path));
       const allowed = allowedBases.some((base) => {
         try {
           return isWithin(realTarget, realpathSync(base));
@@ -7971,13 +8122,10 @@ async function bootstrapNormal() {
     // every path and host-stamps source:{kind:'agent'}; the route locks the
     // scope to the originating project. Always wired (no flag) — it's a
     // project-confined, non-destructive-by-default capability.
-    libraryAgentApi: {
-      agentList: (projectId) => libraryStore.agentList(projectId),
-      agentRead: (projectId, relPath) => libraryStore.agentRead(projectId, relPath),
-      agentWrite: (projectId, sessionId, input) =>
-        libraryStore.agentWrite(projectId, sessionId, input),
-      agentRemove: (projectId, relPath) => libraryStore.agentRemove(projectId, relPath)
-    },
+    libraryAgentApi: runtimeLibraryAgentApi(request => {
+      if (!runtimeSupervisor) throw new Error('Library runtime is unavailable');
+      return runtimeSupervisor.libraryAgent(request);
+    }),
     // goal_* tools: let an agent create/list persistent Goals in its OWN project.
     // The route's projectId is authoritative — agentCreate stamps it onto the
     // input and forces scope to the project, so an agent can't target another
@@ -8076,8 +8224,10 @@ async function bootstrapNormal() {
     throw error;
   }
   if (!unscopedWindow()) createWindow();
-  // tmux orphan reaper (Phase 2): when persistence covers local sessions, kill `cc-*` tmux
-  // servers left over from a previous run that no live pty is bound to. Runs
+  void sharedClient.restore().catch(error => logMainError('sharedClient.restore', error));
+  // Reconcile only this instance's recorded tmux sessions, never another app's
+  // cc-* sessions on the shared default socket. Kill owned sessions from a
+  // previous run that no live pty is bound to. Runs
   // ONCE on boot, after a grace delay so the renderer's session-restore can
   // re-spawn its tabs first (each re-attaches via `tmux new-session -A`, making
   // it live and thus NOT an orphan). Liveness is the main process's own pty map
@@ -8088,7 +8238,8 @@ async function bootstrapNormal() {
     teamLifecycleReconcileTimer = null;
     void (async () => {
       if (store.getConfig().tmuxScope === 'all') {
-        const reaped = await reapOrphanTmuxSessions((sessionId) => ptys.getSession(sessionId) !== null);
+        const ownedTmuxIds = new Set(restoreCapabilities.list().flatMap(entry => entry.sessionId ? [entry.sessionId] : []));
+        const reaped = await reapOrphanTmuxSessions(ownedTmuxIds, (sessionId) => ptys.getSession(sessionId) !== null);
         for (const sessionId of reaped) restoreCapabilities.removeSession(sessionId);
         if (reaped.length > 0) {
           console.log(`[tmux] reaped ${reaped.length} orphan session(s): ${reaped.join(', ')}`);
@@ -8255,6 +8406,7 @@ async function bootstrapNormal() {
   const controlDir = resolveZccDataDir(process.env, app.getPath('home'));
   ensureProductServerCredential();
   startControlPlane({
+    invokeSharedProduct,
     socketPath: join(controlDir, 'control.sock'),
     tokenPath: join(controlDir, 'control.token'),
     log: (m) => console.log(m),
@@ -8361,16 +8513,16 @@ async function bootstrapNormal() {
       return { ok: true, delivered, handle: targetLabel, id: msg.id };
     },
     listSchedules: () => scheduler.list(),
-    runScheduleNow: (id) => {
+    runScheduleNow: async (id) => {
       try {
-        return { ok: true, value: scheduler.runNow(id) };
+        return { ok: true, value: await scheduler.runNow(id) };
       } catch (err) {
         return { ok: false, code: 'RUN_FAILED', message: String(err) };
       }
     },
-    setScheduleEnabled: (id, enabled) => {
+    setScheduleEnabled: async (id, enabled) => {
       try {
-        const task = scheduler.setEnabled(id, enabled);
+        const task = await scheduler.setEnabled(id, enabled);
         if (!task) return { ok: false, code: 'NOT_FOUND', message: `schedule not found: ${id}` };
         return { ok: true, value: task };
       } catch (err) {
@@ -8406,6 +8558,7 @@ async function bootstrapNormal() {
     // Dock-reactivate must restore the full shell. Recreate it when no UNSCOPED
     // window is live — not merely when zero windows exist — so a user who closed
     // the main window but left a scoped project window open can still get back.
+    if (sharedClient.showSelected()) return;
     if (!unscopedWindow()) createWindow();
     else showMainWindow();
   });
@@ -8488,6 +8641,10 @@ app.on('before-quit', (event) => {
   personas.stop();
   teams.stop();
   libraryStore.stop?.();
+  libraryNotifications.dispose();
+  projectsNotifications.dispose();
+  feedStore.stop();
+  projectCatalogs.stop();
   skillBundles.stop();
   scheduleGroups.stop();
   stopSkillsWatchers();
@@ -8549,6 +8706,7 @@ app.on('before-quit', (event) => {
     controlPlane = null;
     handle.close().catch((err) => logMainError('controlPlane.close', err));
   }
+  sharedClient.close();
   mobileGateway.close().catch((err) => logMainError('mobileGateway.close', err));
   if (runtimeSupervisor) {
     const runtime = runtimeSupervisor;
@@ -8584,7 +8742,7 @@ app.on('web-contents-created', (_e, contents) => {
     }
   };
   const preventExternalNavigation = (event: Electron.Event, url: string) => {
-    if (!isTrustedRendererUrl(url)) event.preventDefault();
+    if (!isTrustedRendererUrl(url) && !allowsSharedNavigation(contents, url)) event.preventDefault();
   };
   contents.on('will-navigate', preventExternalNavigation);
   contents.on('will-redirect', preventExternalNavigation);

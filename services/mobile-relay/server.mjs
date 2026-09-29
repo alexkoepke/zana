@@ -1,13 +1,15 @@
 import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
+import { isMachinePath, machineIdentity } from './machine-routes.mjs';
 import { TUNNEL_PATH, LIMITS, headers, validPath, parseFrame, send, dataFrames, bytes, heartbeat, remoteOrigin, validToken } from './protocol.mjs';
 
 /** One authenticated computer per relay process. Pairing remains on that computer. */
-export function createRelay({ token, publicUrl, allowLocal = false, heartbeatMs = 20_000, requestTimeoutMs = 25_000 }) {
+export function createRelay({ token, publicUrl, allowLocal = false, heartbeatMs = 20_000, requestTimeoutMs = 25_000, queueTimeoutMs = 5000, onVisitor = () => {} }) {
   if (!validToken(token)) throw new Error('Relay token must be 43–128 URL-safe characters');
   const origin = remoteOrigin(publicUrl, allowLocal);
   const streams = new Map();
+  const pendingReads = new Map();
   let desktop = null;
   let nextId = 0;
   const id = () => { do { nextId = nextId % 0xffffffff + 1; } while (streams.has(nextId)); return nextId; };
@@ -26,8 +28,13 @@ export function createRelay({ token, publicUrl, allowLocal = false, heartbeatMs 
     clearTimeout(stream.timer);
     streams.delete(key);
     if (desktop) send(desktop, { type: 'cancel', id: key });
+    drainReads();
   };
   const disconnect = () => {
+    for (const pending of pendingReads.values()) {
+      pending.remove();
+      fail(pending.res, 503, 'Computer disconnected. Retry when it reconnects.');
+    }
     for (const [key, stream] of streams) {
       clearTimeout(stream.timer);
       if (stream.res) fail(stream.res, 503, 'Computer disconnected. Reconnect and check whether your last action completed.');
@@ -36,17 +43,35 @@ export function createRelay({ token, publicUrl, allowLocal = false, heartbeatMs 
     }
   };
   const wss = new WebSocketServer({ noServer: true, maxPayload: LIMITS.frame, perMessageDeflate: false });
-  const handleHttp = (req, res) => {
-    if (!trusted(req)) return fail(res, 403, 'Untrusted origin');
-    if (req.url === '/_relay/health' && req.method === 'GET') {
-      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-      return res.end(JSON.stringify({ relay: 1, connected: desktop?.readyState === WebSocket.OPEN }));
+  const drainReads = () => {
+    while (available() && pendingReads.size) {
+      const pending = pendingReads.values().next().value;
+      pending.remove();
+      if (pending.res.destroyed || pending.req.destroyed) continue;
+      forwardHttp(pending.req, pending.res, pending.incoming);
+      pending.req.resume();
     }
-    if (!validPath(req.url) || !['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return fail(res, 404, 'Not found');
-    if (!available()) return fail(res, 503, 'Computer is offline or busy. Keep Zana running and retry.');
-    let incoming;
-    try { incoming = headers(req.headers); } catch { return fail(res, 400, 'Invalid headers'); }
-    if (Number(incoming['content-length'] ?? 0) > LIMITS.request) return fail(res, 413, 'Body too large');
+  };
+  const queueRead = (req, res, incoming) => {
+    // Browser module preloads can exceed the installed desktop's 64-stream
+    // limit. Hold only bodyless reads, with bounded count and wait time; never
+    // replay a write or raise the peer's protocol limit.
+    if (!['GET', 'HEAD'].includes(req.method) || incoming['content-length'] && Number(incoming['content-length']) !== 0 || req.headers['transfer-encoding'] || pendingReads.size >= 256) {
+      return fail(res, 503, 'Computer is busy. Retry shortly.');
+    }
+    req.pause();
+    const remove = () => {
+      clearTimeout(pending.timer);
+      pendingReads.delete(res);
+      req.off('aborted', remove); req.off('error', remove); res.off('close', remove);
+    };
+    const pending = { req, res, incoming, remove, timer: null };
+    pendingReads.set(res, pending);
+    req.once('aborted', remove); req.once('error', remove); res.once('close', remove);
+    pending.timer = setTimeout(() => { remove(); fail(res, 503, 'Computer is busy. Retry shortly.'); }, queueTimeoutMs);
+    pending.timer.unref();
+  };
+  const forwardHttp = (req, res, incoming) => {
     const key = id();
     const stream = { res, bytes: 0, timer: null };
     const arm = () => {
@@ -68,6 +93,20 @@ export function createRelay({ token, publicUrl, allowLocal = false, heartbeatMs 
     req.on('end', () => { if (streams.has(key)) send(desktop, { type: 'request-end', id: key }); });
     req.on('error', () => cancel(key));
     res.on('close', () => cancel(key));
+  };
+  const handleHttp = (req, res) => {
+    if (!trusted(req)) return fail(res, 403, 'Untrusted origin');
+    if (req.url === '/_relay/health' && req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      return res.end(JSON.stringify({ relay: 1, connected: desktop?.readyState === WebSocket.OPEN }));
+    }
+    if (!validPath(req.url) || !['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return fail(res, 404, 'Not found');
+    if (desktop?.readyState !== WebSocket.OPEN) return fail(res, 503, 'Computer is offline. Keep Zana running and retry.');
+    let incoming;
+    try { incoming = headers(req.headers); } catch { return fail(res, 400, 'Invalid headers'); }
+    if (Number(incoming['content-length'] ?? 0) > LIMITS.request) return fail(res, 413, 'Body too large');
+    if (!available()) return queueRead(req, res, incoming);
+    forwardHttp(req, res, incoming);
   };
   const handleUpgrade = (req, socket, head) => {
     const reject = code => socket.end(`HTTP/1.1 ${code} Rejected\r\nConnection: close\r\n\r\n`);
@@ -100,7 +139,7 @@ export function createRelay({ token, publicUrl, allowLocal = false, heartbeatMs 
                 else stream.res.write(chunk);
               } else if (frame.type === 'response-end') {
                 if (!stream.res.headersSent) throw new Error('Missing response');
-                clearTimeout(stream.timer); streams.delete(frame.id); stream.res.end();
+                clearTimeout(stream.timer); streams.delete(frame.id); stream.res.end(); drainReads();
               } else if (frame.type === 'error') { cancel(frame.id); fail(stream.res, 502, 'Computer request failed'); }
               else throw new Error('Unexpected response');
             } else if (frame.type === 'ws-data') {
@@ -113,14 +152,15 @@ export function createRelay({ token, publicUrl, allowLocal = false, heartbeatMs 
         });
       });
     } else {
-      if (!['/ws', '/ws/'].includes(req.url) || !available()) return reject(503);
+      if ((!['/ws', '/ws/'].includes(req.url) && !(machineIdentity(req.headers) && isMachinePath('GET', req.url, true))) || !available()) return reject(503);
       let incoming;
       try { incoming = headers(req.headers); } catch { return reject(400); }
       wss.handleUpgrade(req, socket, head, ws => {
         const key = id();
         streams.set(key, { ws });
+        onVisitor(ws, req);
         heartbeat(ws, heartbeatMs);
-        send(desktop, { type: 'ws-open', id: key, headers: incoming });
+        send(desktop, { type: 'ws-open', id: key, path: req.url, headers: incoming });
         ws.on('message', (data, binary) => {
           if (data.length > 1024 * 1024) { ws.close(1009); return; }
           if (desktop) send(desktop, { type: 'ws-data', id: key, data: data.toString('base64'), binary });
@@ -149,7 +189,9 @@ export async function startRelay(options) {
   const server = createServer(relay.handleHttp);
   server.headersTimeout = 15_000;
   server.requestTimeout = 30_000;
-  server.maxConnections = 160;
+  // Include idle edge-proxy keep-alives; active work remains bounded by the
+  // per-desktop stream and pending-read limits above.
+  server.maxConnections = 1024;
   server.on('upgrade', relay.handleUpgrade);
   try {
     await new Promise((resolve, reject) => {

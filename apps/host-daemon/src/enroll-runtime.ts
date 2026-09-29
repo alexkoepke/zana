@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { enrollDaemonHost } from './enroll.js';
@@ -7,6 +7,7 @@ import { acquireDaemonLock } from './lock.js';
 import { readHostAuth, writeHostAuth } from './machine-auth.js';
 import { startEnrolledHostConnection, type EnrolledHostConnection } from './server-connection.js';
 import { disposeHostFsWatcher } from './workspace-fs-watch.js';
+import { connectHostFetch, readConnectHostAccess } from './connect-access.js';
 
 export interface EnrolledHostDaemon {
   hostId: string;
@@ -36,6 +37,7 @@ async function mintCredentials(options: {
   hostId?: string;
   hostName?: string;
   instanceId: string;
+  connectCredential?: string;
 }): Promise<{ hostId: string; hostKey: string }> {
   const requestedHostId = options.hostId ?? resolveHostId(options.dataDir);
   const enrolled = await enrollDaemonHost({
@@ -43,13 +45,16 @@ async function mintCredentials(options: {
     token: options.token,
     hostName: options.hostName ?? detectHostName(),
     instanceId: options.instanceId,
-    hostId: requestedHostId
+    hostId: requestedHostId,
+    fetchFn: connectHostFetch(options.serverUrl, options.connectCredential)
   });
   persistHostId(options.dataDir, enrolled.hostId);
   writeHostAuth(options.dataDir, {
     hostId: enrolled.hostId,
     hostKey: enrolled.hostKey,
-    hostName: options.hostName ?? detectHostName()
+    ...(options.connectCredential ? { enrollmentId: createHash('sha256').update(options.token).digest('hex') } : {}),
+    hostName: options.hostName ?? detectHostName(),
+    serverUrl: options.serverUrl
   });
   return { hostId: enrolled.hostId, hostKey: enrolled.hostKey };
 }
@@ -60,6 +65,7 @@ async function openSession(options: {
   hostId: string;
   hostKey: string;
   instanceId: string;
+  connectCredential?: string;
   onSocketClose?: (code: number) => void;
   onConnectionChange?: (connected: boolean) => void;
 }): Promise<EnrolledHostConnection> {
@@ -69,6 +75,7 @@ async function openSession(options: {
     hostKey: options.hostKey,
     instanceId: options.instanceId,
     dataDir: options.dataDir,
+    connectCredential: options.connectCredential,
     onConnectionChange: options.onConnectionChange,
     onSocketClose: options.onSocketClose
   });
@@ -88,6 +95,7 @@ export async function startEnrolledHostDaemon(options: {
   dataDir: string;
   serverUrl: string;
   token?: string;
+  connectCredential?: string;
   hostId?: string;
   hostName?: string;
   /** Desktop co-started daemon: replace another holder of this data dir. */
@@ -97,10 +105,14 @@ export async function startEnrolledHostDaemon(options: {
 }): Promise<EnrolledHostDaemon> {
   const releaseLock = acquireDaemonLock(options.dataDir, { steal: options.stealLock === true });
   try {
+    const access = readConnectHostAccess(options.dataDir, options.serverUrl);
+    if (access && options.hostId && access.hostId !== options.hostId) throw new Error('Machine access host mismatch');
+    options = { ...options, connectCredential: options.connectCredential ?? access?.credential, hostId: options.hostId ?? access?.hostId };
     const instanceId = randomUUID();
     const existing = readHostAuth(options.dataDir);
+    if (existing?.serverUrl && existing.serverUrl.replace(/\/$/, '') !== options.serverUrl.replace(/\/$/, '')) throw new Error('Existing machine enrollment belongs to another server');
     const existingUsable =
-      existing && (!options.hostId || existing.hostId === options.hostId);
+      existing && (!options.hostId || existing.hostId === options.hostId) && !(options.connectCredential && options.token && existing.enrollmentId !== createHash('sha256').update(options.token).digest('hex'));
     let hostId: string;
     let connection: EnrolledHostConnection;
     if (existingUsable) {
@@ -108,6 +120,7 @@ export async function startEnrolledHostDaemon(options: {
         connection = await openSession({
           dataDir: options.dataDir,
           serverUrl: options.serverUrl,
+          connectCredential: options.connectCredential,
           hostId: existing.hostId,
           hostKey: existing.hostKey,
           instanceId,
@@ -121,6 +134,7 @@ export async function startEnrolledHostDaemon(options: {
           dataDir: options.dataDir,
           serverUrl: options.serverUrl,
           token: options.token,
+          connectCredential: options.connectCredential,
           hostId: options.hostId ?? existing.hostId,
           hostName: options.hostName,
           instanceId
@@ -129,6 +143,7 @@ export async function startEnrolledHostDaemon(options: {
         connection = await openSession({
           dataDir: options.dataDir,
           serverUrl: options.serverUrl,
+          connectCredential: options.connectCredential,
           hostId: minted.hostId,
           hostKey: minted.hostKey,
           instanceId,
@@ -144,6 +159,7 @@ export async function startEnrolledHostDaemon(options: {
         dataDir: options.dataDir,
         serverUrl: options.serverUrl,
         token: options.token,
+        connectCredential: options.connectCredential,
         hostId: options.hostId,
         hostName: options.hostName,
         instanceId
@@ -152,6 +168,7 @@ export async function startEnrolledHostDaemon(options: {
       connection = await openSession({
         dataDir: options.dataDir,
         serverUrl: options.serverUrl,
+        connectCredential: options.connectCredential,
         hostId: minted.hostId,
         hostKey: minted.hostKey,
         instanceId,

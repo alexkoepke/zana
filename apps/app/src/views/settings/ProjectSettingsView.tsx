@@ -1,3 +1,4 @@
+import { ProjectSourcesSettings } from './ProjectSourcesSettings.js';
 import { product } from '../../lib/product-client.js';
 import { hasDesktopBridge } from '../../lib/app-surface.js';
 import { useState, useEffect, useCallback, useRef } from 'react';
@@ -62,6 +63,8 @@ export function ProjectSettingsView({
   return (
     <>
       {project.remote && <ProjectRemoteSettings project={project} onSaved={onSaved} />}
+
+      {!project.remote && !project.quickAgent && <ProjectSourcesSettings key={project.id} project={project} onSaved={onSaved} />}
 
       <ProjectHarnessSettings project={project} onOpen={onOpen} onSaved={onSaved} />
 

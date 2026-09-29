@@ -290,6 +290,7 @@ export interface PluginFileOpenerSource {
   threadId: string | null;
   environmentId: string | null;
   projectId: string | null;
+  hostId?: string;
 }
 
 export interface PluginFileOpenerProps {
